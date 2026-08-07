@@ -440,6 +440,79 @@ def gate11() -> None:
     )
 
 
+def gate12(insert_stop: str, solo_route: str, solo_direction: str, solo_seq: int) -> None:
+    """Вставка и удаление остановки: обе меняют покрытие, а не только длину списка.
+
+    Случай для удаления подбирается так же, как для обрезки: остановка, которая
+    в одиночку держит населённый гексагон. В плотном городе удаление типичной
+    серединной остановки не меняет покрытия — соседние остановки накрывают тот же
+    гексагон, и ноль там честный. Проверять надо на случае, где эффект обязан быть.
+    """
+    inserted, _ = post_json(
+        "/api/scenario",
+        {
+            "weekday": "fri",
+            "hour": 8,
+            "ops": [
+                {
+                    "type": "insert_stop",
+                    "route_num": "14",
+                    "direction": "fwd",
+                    "stop_id": insert_stop,
+                    "after_seq": 5,
+                }
+            ],
+        },
+    )
+    removed, ms = post_json(
+        "/api/scenario",
+        {
+            "weekday": "fri",
+            "hour": 8,
+            "ops": [
+                {
+                    "type": "remove_stop",
+                    "route_num": solo_route,
+                    "direction": solo_direction,
+                    "seq": solo_seq,
+                }
+            ],
+        },
+    )
+    grew = inserted["affected_routes"][0]
+    shrank = removed["affected_routes"][0]
+    check(
+        "Гейт 12 — вставка и удаление остановки меняют покрытие",
+        inserted["gained"] > 0
+        and grew["n_stops_after"] == grew["n_stops_before"] + 1
+        and removed["lost"] > 0
+        and shrank["n_stops_after"] == shrank["n_stops_before"] - 1,
+        f"вставка в 14 после seq=5: +{inserted['gained']:,.0f} чел., остановок "
+        f"{grew['n_stops_before']}→{grew['n_stops_after']}; удаление {solo_route} "
+        f"({solo_direction}) seq={solo_seq}: −{removed['lost']:,.0f} чел., остановок "
+        f"{shrank['n_stops_before']}→{shrank['n_stops_after']}; {ms:.0f} мс",
+    )
+
+
+def gate13() -> None:
+    """Геометрия всей сети одним запросом и в бюджете загрузки."""
+    body, ms = get("/api/network/geometry")
+    data = json.loads(body)
+    kb = len(body) / 1024
+    lines = data["features"]
+    all_lines = all(f["geometry"]["type"] == "LineString" for f in lines)
+    has_props = all(
+        {"route_num", "direction", "quality"} <= set(f["properties"]) for f in lines
+    )
+    check(
+        "Гейт 13 — геометрия сети отдаётся одним запросом",
+        len(lines) > 100 and all_lines and has_props and kb < 1500,
+        f"{data['count']} направлений, {kb:.0f} КБ, упрощение: {data['simplified']} "
+        f"(допуск {data['tolerance_deg']}); все объекты LineString: {all_lines}; "
+        f"признак качества у каждого: {has_props}; {ms:.0f} мс",
+    )
+
+
 def main() -> None:
     import polars as pl
 
@@ -491,6 +564,8 @@ def main() -> None:
     offline = gate9(store, gain_stop_name)
     gate10(store, gain_stop_name)
     gate11()
+    gate12(extend_stops[0], trim["route_num"], trim["direction"], int(trim["seq"]))
+    gate13()
 
     print()
     print("Разобранный сценарий (фраза → объект для POST /api/scenario):")

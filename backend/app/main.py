@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 from contextlib import asynccontextmanager
 
 import polars as pl
@@ -119,6 +120,69 @@ def routes() -> dict:
         .sort("route_num")
     )
     return {"count": grouped.height, "routes": grouped.to_dicts()}
+
+
+@app.get("/api/network/geometry")
+def network_geometry() -> Response:
+    """Линии всей сети одной коллекцией: фронт грузит их один раз при старте.
+
+    Только геометрия — без остановок и без времени хода. Отдаются те 125
+    направлений из 223, у которых геометрия вообще есть; у остальных
+    `quality=approximate` и линии в базе нет.
+
+    Путь намеренно не `/api/routes/geometry`: этот сегмент занят параметром
+    `{route_num}`, а номера маршрутов бывают буквенными («13Т»), то есть сузить
+    параметр нечем. Отдельный сегмент снимает зависимость от порядка регистрации
+    маршрутов — чинить такое порядком ненадёжно.
+
+    Полная выгрузка весит 1.6 МБ, это больше бюджета одной загрузки, поэтому
+    линии упрощаются по Дугласу-Пекеру и в ответе стоит признак `simplified`.
+    """
+    st = store()
+    if st.routes is None:
+        raise HTTPException(503, "нет data/build/routes.parquet (шаг 4 пайплайна)")
+
+    rows = st.routes.filter(
+        pl.col("geometry_wkt").is_not_null() & (pl.col("geometry_wkt") != "")
+    ).select("route_num", "direction", "quality", "geometry_wkt").to_dicts()
+
+    def collection(tolerance: float | None) -> dict:
+        features = []
+        for row in rows:
+            line = shapely.from_wkt(row["geometry_wkt"])
+            if tolerance:
+                line = line.simplify(tolerance, preserve_topology=False)
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [round(x, config.COORD_PRECISION), round(y, config.COORD_PRECISION)]
+                            for x, y in line.coords
+                        ],
+                    },
+                    "properties": {
+                        "route_num": row["route_num"],
+                        "direction": row["direction"],
+                        "quality": row["quality"],
+                    },
+                }
+            )
+        return {
+            "type": "FeatureCollection",
+            "count": len(features),
+            "simplified": tolerance is not None,
+            "tolerance_deg": tolerance,
+            "features": features,
+        }
+
+    body = json.dumps(collection(None), ensure_ascii=False)
+    if len(body.encode()) > config.ROUTE_GEOMETRY_MAX_BYTES:
+        body = json.dumps(
+            collection(config.ROUTE_SIMPLIFY_TOLERANCE_DEG), ensure_ascii=False
+        )
+    return Response(content=body, media_type="application/json; charset=utf-8")
 
 
 @app.get("/api/routes/{route_num}")

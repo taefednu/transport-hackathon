@@ -143,6 +143,7 @@ GET  /api/segments/parallel         k и n для разведения лини�
 GET  /api/search                    поиск с узбекской транслитерацией
 GET  /api/export/schedule           CSV
 GET  /api/export/route              GeoJSON
+GET  /api/network/geometry          линии всей сети одной коллекцией, упрощённые
 POST /api/nl/scenario               фраза словами → объект сценария (не применяет его)
 POST /api/explain                   результат сценария → абзац служебной записки
 GET  /api/llm                       каким путём пойдут оба текстовых эндпоинта сейчас
