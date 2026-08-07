@@ -124,7 +124,9 @@ def main() -> None:
                     "veh_after": affected["required_vehicles_after"],
                     "extra": extra,
                     "city_share": affected["segments_at_city_speed"] / segments,
-                    # людей на одну дополнительную машину; без новых машин — выигрыш даром
+                    # людей на одну дополнительную машину. Ноль новых машин не значит
+                    # «бесплатно»: оборот всё равно растёт, просто прибавка умещается
+                    # в текущий выпуск за счёт округления ceil(оборот / интервал)
                     "per_vehicle": result["gained"] / extra if extra > 0 else float("inf"),
                 }
             )
@@ -139,7 +141,7 @@ def main() -> None:
     print(header)
     print("-" * len(header))
     for row in rows[:TOP]:
-        per = "даром" if row["per_vehicle"] == float("inf") else f"{row['per_vehicle']:,.0f}"
+        per = "в выпуск" if row["per_vehicle"] == float("inf") else f"{row['per_vehicle']:,.0f}"
         print(
             f"{row['route']:>12} {row['stop'][:28]:<28} {row['added_stops']:>3} "
             f"{row['tail_km']:>6.2f}к {row['gained']:>9,.0f} "
@@ -152,8 +154,9 @@ def main() -> None:
         print(
             f"\nЛучший по цене: маршрут {best['route']} до «{best['stop']}» — "
             f"+{best['gained']:,.0f} человек, хвост {best['tail_km']:.2f} км "
-            f"при длине маршрута {best['length_km']:.1f} км, машин "
-            f"{best['veh_before']}→{best['veh_after']}."
+            f"при длине маршрута {best['length_km']:.1f} км, оборот "
+            f"{best['cycle_before']:.1f}→{best['cycle_after']:.1f} мин умещается "
+            f"в текущий выпуск {best['veh_before']} машин."
         )
 
 
