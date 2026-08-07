@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import (
+    assistant as assistant_mod,
     config,
     coverage,
     explain as explain_mod,
@@ -23,6 +24,7 @@ from app import (
     search as search_mod,
     validation,
 )
+from app import trace
 from app.store import Store, load
 
 STATE: dict[str, Store] = {}
@@ -168,33 +170,51 @@ def network_geometry() -> Response:
     ).select("route_num", "direction", "quality", "geometry_wkt").to_dicts()
 
     def collection(tolerance: float | None) -> dict:
+        """Куски трассы без швов.
+
+        Разрывы ищутся до упрощения: Дуглас-Пекер на прямой улице оставляет
+        две точки в сотнях метров друг от друга, и по упрощённой линии шов
+        от настоящей прямой уже не отличить.
+        """
         features = []
+        directions_with_gaps = 0
         for row in rows:
-            line = shapely.from_wkt(row["geometry_wkt"])
-            if tolerance:
-                line = line.simplify(tolerance, preserve_topology=False)
-            features.append(
-                {
-                    "type": "Feature",
-                    "geometry": {
-                        "type": "LineString",
-                        "coordinates": [
-                            [round(x, config.COORD_PRECISION), round(y, config.COORD_PRECISION)]
-                            for x, y in line.coords
-                        ],
-                    },
-                    "properties": {
-                        "route_num": row["route_num"],
-                        "direction": row["direction"],
-                        "quality": row["quality"],
-                    },
-                }
-            )
+            pieces, gaps = trace.split_at_gaps(shapely.from_wkt(row["geometry_wkt"]))
+            if gaps:
+                directions_with_gaps += 1
+            for index, piece in enumerate(pieces):
+                if tolerance:
+                    piece = piece.simplify(tolerance, preserve_topology=False)
+                if len(piece.coords) < 2:
+                    continue
+                features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [
+                                [round(x, config.COORD_PRECISION), round(y, config.COORD_PRECISION)]
+                                for x, y in piece.coords
+                            ],
+                        },
+                        "properties": {
+                            "route_num": row["route_num"],
+                            "direction": row["direction"],
+                            "quality": row["quality"],
+                            "piece": index,
+                            "gaps": gaps,
+                        },
+                    }
+                )
         return {
             "type": "FeatureCollection",
             "count": len(features),
             "simplified": tolerance is not None,
             "tolerance_deg": tolerance,
+            "directions_total": len(rows),
+            "directions_with_gaps": directions_with_gaps,
+            "gap_near_m": config.GEOMETRY_GAP_NEAR_M,
+            "gap_far_m": config.GEOMETRY_GAP_FAR_M,
             "features": features,
         }
 
@@ -248,9 +268,12 @@ def route_detail(
         )
 
     geometry = None
+    gap_indices: list[int] = []
     if route.get("geometry_wkt"):
         line = shapely.from_wkt(route["geometry_wkt"])
-        geometry = {"type": "LineString", "coordinates": [list(c) for c in line.coords]}
+        coords = [list(c) for c in line.coords]
+        gap_indices = trace.gap_indices([(c[0], c[1]) for c in coords])
+        geometry = {"type": "LineString", "coordinates": coords}
 
     warnings = validation.route_warnings(st, route_num, direction, weekday)
 
@@ -265,6 +288,10 @@ def route_detail(
         "work_start": route.get(f"work_start_{weekday}"),
         "work_end": route.get(f"work_end_{weekday}"),
         "geometry": geometry,
+        # индексы рёбер-швов: ребро i идёт от точки i к точке i+1.
+        # Фронт по ним рвёт линию и не ставит на шов ни щитки, ни машины.
+        "geometry_gap_indices": gap_indices,
+        "geometry_gaps": len(gap_indices),
         "stops": stops_seq,
         "segment_times": segment_times,
         "actual_headway": schedule.actual_headway_by_hour(st, route_num, weekday),
@@ -320,6 +347,71 @@ def route_schedule(
             "warnings": warnings}
 
 
+@app.get("/api/stops/{stop_id}/walkzone")
+def stop_walkzone(
+    stop_id: str,
+    limit_m: float = Query(default=None, gt=0, le=2000),
+) -> dict:
+    """Зона пешей доступности остановки — по сети, а не кругом на карте.
+
+    Возвращает рёбра пешеходного графа, до которых дошли за `limit_m`, и
+    расстояние, на котором каждое ребро достигнуто: по нему фронт рисует рост
+    зоны от остановки, как требует §14 спеки. Круг радиусом 500 м здесь был бы
+    враньём — пешеход ходит по улицам, а не по прямой.
+    """
+    st = store()
+    row = st.stops.filter(pl.col("stop_id") == stop_id)
+    if row.is_empty():
+        raise HTTPException(404, f"остановки {stop_id} нет в базе")
+
+    limit = float(limit_m or config.WALK_LIMIT_M)
+    source = int(row["walk_node_id"][0])
+    graph = st.walk_graph
+    reached = graph.reachable(source, limit)
+
+    edges = []
+    for node, d_from in reached.items():
+        start, end = graph.indptr[node], graph.indptr[node + 1]
+        for k in range(start, end):
+            neighbour = int(graph.indices[k])
+            d_to = reached.get(neighbour)
+            if d_to is None or d_to < d_from:
+                continue
+            # ребро между равноудалёнными вершинами отдаём один раз
+            if d_to == d_from and neighbour < node:
+                continue
+            edges.append(
+                {
+                    "coords": [
+                        [round(float(graph.lon[node]), config.COORD_PRECISION),
+                         round(float(graph.lat[node]), config.COORD_PRECISION)],
+                        [round(float(graph.lon[neighbour]), config.COORD_PRECISION),
+                         round(float(graph.lat[neighbour]), config.COORD_PRECISION)],
+                    ],
+                    "d": round(d_to, 1),
+                }
+            )
+
+    # население, до которого от этой остановки можно дойти пешком
+    people = None
+    if st.stop_hexes is not None:
+        cells = st.stop_hexes.filter(
+            (pl.col("stop_id") == stop_id) & (pl.col("walk_m") <= limit)
+        )["h3_id"].to_list()
+        if cells:
+            people = float(
+                st.hexes.filter(pl.col("h3_id").is_in(cells))["population"].sum()
+            )
+
+    return {
+        "stop_id": stop_id,
+        "limit_m": limit,
+        "nodes": len(reached),
+        "people": people,
+        "edges": edges,
+    }
+
+
 @app.get("/api/baseline")
 def baseline(
     weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
@@ -362,6 +454,27 @@ def explain(body: dict) -> dict:
     if not isinstance(body, dict) or not body:
         raise HTTPException(422, "нужно тело с результатом сценария")
     return explain_mod.explain(store(), body)
+
+
+@app.post("/api/assistant")
+def assistant(body: dict) -> dict:
+    """Вопрос словами → вызовы инструментов → ответ по посчитанному.
+
+    Ассистент ничего не применяет: сценарии он возвращает действием
+    `apply_scenario` в том же виде, который принимает POST /api/scenario,
+    а решение принимает человек.
+    """
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(422, "нужно поле text с вопросом")
+    hour = body.get("hour")
+    return assistant_mod.ask(
+        store(),
+        STATE["search_index"],
+        text,
+        weekday=body.get("weekday"),
+        hour=None if hour is None else int(hour),
+    )
 
 
 @app.get("/api/llm")

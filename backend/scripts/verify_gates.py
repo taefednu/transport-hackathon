@@ -566,6 +566,199 @@ def gate14(extend_stops: list[str], trim_route: str, trim_direction: str, trim_s
     )
 
 
+# требование к ассистенту: ответ приходит меньше чем за десять секунд в самом
+# длинном сценарии. Порог один на все вопросы, поэтому и константа одна
+MAX_ANSWER_MS = 10_000
+ATTENTION_QUESTION = "какие маршруты требуют внимания"
+OUT_OF_SCOPE_QUESTION = "какой пассажиропоток будет на 14 маршруте в следующем году"
+
+
+def numbers_outside_evidence(answer: dict) -> list[float]:
+    """Числа ответа, которых нет ни в результатах инструментов, ни в оговорках.
+
+    Оговорки и список умений собраны кодом из тех же артефактов и уходят в том
+    же ответе отдельными полями — это такие же посчитанные числа, как числа
+    инструментов, и в допустимые они входят на тех же правах.
+    """
+    from app import explain as explain_mod
+
+    allowed = explain_mod.allowed_numbers(
+        {
+            **answer.get("evidence", {}),
+            "оговорки": answer.get("disclaimers") or [],
+            "умения": answer.get("capabilities") or [],
+        }
+    )
+    return sorted(explain_mod.numbers_in(answer["text"]) - allowed)
+
+
+def gate15() -> dict:
+    """Вопрос про проблемные маршруты: список с числами из диагностики."""
+    answer, ms = post_json("/api/assistant", {"text": ATTENTION_QUESTION})
+    evidence = answer["evidence"].get("routes_attention") or {}
+    routes = evidence.get("routes") or []
+    with_numbers = [r for r in routes if r.get("signs")]
+    extra = numbers_outside_evidence(answer)
+    check(
+        "Гейт 15 — «какие маршруты требуют внимания» отвечает списком с числами",
+        len(routes) >= 3
+        and len(with_numbers) == len(routes)
+        and all(r.get("reasons") for r in routes)
+        and not extra
+        and ms < MAX_ANSWER_MS,
+        f"путь: {answer['source']}; инструменты {[s['tool'] for s in answer['steps']]}; "
+        f"маршрутов в ответе {len(routes)} из {evidence.get('routes_with_signs')} с признаками; "
+        f"у каждого признаки с числами: {len(with_numbers) == len(routes)}; "
+        f"чисел вне результатов инструментов: {len(extra)}"
+        + (f" {extra}" if extra else "")
+        + f"; {ms:.0f} мс",
+    )
+    return answer
+
+
+def gate16(route_num: str) -> dict:
+    """Вопрос про конкретный маршрут: его показатели, а не общие слова."""
+    answer, ms = post_json(
+        "/api/assistant", {"text": f"расскажи про маршрут {route_num}"}
+    )
+    profile = answer["evidence"].get("route_profile") or {}
+    extra = numbers_outside_evidence(answer)
+    selected = [a for a in answer["actions"] if a["type"] == "select_route"]
+    check(
+        "Гейт 16 — вопрос про маршрут возвращает его показатели",
+        profile.get("route_num") == route_num
+        and profile.get("planned_headway_min") is not None
+        and profile.get("actual_headway_min_at_hour") is not None
+        and len(profile.get("travel_min_by_hour") or []) >= 2
+        and bool(selected)
+        and not extra
+        and ms < MAX_ANSWER_MS,
+        f"путь: {answer['source']}; маршрут {profile.get('route_num')}: интервал плановый "
+        f"{profile.get('planned_headway_min')} мин против фактического "
+        f"{profile.get('actual_headway_min_at_hour')} мин в {profile.get('hour_label')}; "
+        f"часов со временем хода {len(profile.get('travel_min_by_hour') or [])}; "
+        f"по медиане города {profile.get('segments_at_city_speed_percent')}% перегонов; "
+        f"действие для интерфейса: {selected[0]['type'] if selected else '—'}; "
+        f"чисел вне результатов: {len(extra)}; {ms:.0f} мс",
+    )
+    return answer
+
+
+def gate17(route_num: str) -> dict:
+    """«Что сделать с маршрутом N»: вариант с прибавкой, ценой и готовым сценарием.
+
+    Сценарий из действия отправляется в движок как есть. Это и есть проверка
+    того, что фронту нечего досбирать: тот же объект, тот же прирост.
+    """
+    answer, ms = post_json(
+        "/api/assistant", {"text": f"что можно сделать с маршрутом {route_num}"}
+    )
+    options = (answer["evidence"].get("route_options") or {}).get("options") or []
+    ready = [a for a in answer["actions"] if a["type"] == "apply_scenario"]
+    extra = numbers_outside_evidence(answer)
+
+    accepted = replayed = None
+    if ready:
+        code, body = post_status("/api/scenario", ready[0]["scenario"])
+        accepted = code == 200
+        replayed = round(json.loads(body)["gained"]) if accepted else None
+
+    check(
+        "Гейт 17 — «что сделать с маршрутом» даёт вариант с ценой и готовый сценарий",
+        bool(options)
+        and options[0]["gained_people"] > 0
+        and options[0]["required_vehicles_after"] is not None
+        and bool(ready)
+        and accepted
+        and replayed == options[0]["gained_people"]
+        and not extra
+        and ms < MAX_ANSWER_MS,
+        f"путь: {answer['source']}; вариантов {len(options)}: продлить {route_num} "
+        f"({options[0]['direction']}) до «{options[0]['stop_name']}» — "
+        f"+{options[0]['gained_people']:,} чел., машин "
+        f"{options[0]['required_vehicles_before']}→{options[0]['required_vehicles_after']}; "
+        f"движок принял сценарий из действия: {accepted}, прирост при повторе "
+        f"{replayed:,} против {options[0]['gained_people']:,}; "
+        f"чисел вне результатов: {len(extra)}; {ms:.0f} мс"
+        if options
+        else f"вариантов не нашлось; {ms:.0f} мс",
+    )
+    return answer
+
+
+def gate18() -> dict:
+    """Вопрос вне возможностей: понятный отказ со списком того, что доступно."""
+    answer, ms = post_json("/api/assistant", {"text": OUT_OF_SCOPE_QUESTION})
+    text = answer["text"]
+    check(
+        "Гейт 18 — вопрос вне возможностей получает отказ со списком умений",
+        answer["supported"] is False
+        and len(answer.get("capabilities") or []) >= 4
+        and all(item.split()[0] in text for item in answer["capabilities"])
+        and "не хватает опознанных объектов" not in text
+        and ms < MAX_ANSWER_MS,
+        f"supported={answer['supported']}; причина: {answer['reason']}; "
+        f"умений перечислено {len(answer.get('capabilities') or [])}; "
+        f"старого «не хватает опознанных объектов» в тексте нет: "
+        f"{'не хватает опознанных объектов' not in text}; {ms:.0f} мс",
+    )
+    return answer
+
+
+def gate19(store, attention_route: str, options_route: str) -> dict:
+    """Те же четыре вопроса при выключенной модели, в том же процессе."""
+    import importlib
+    import os
+    import time as time_mod
+
+    from app import assistant as assistant_mod, config, llm
+    from app import search as search_mod
+
+    previous = os.environ.get("QATNOV_LLM_DISABLED")
+    os.environ["QATNOV_LLM_DISABLED"] = "1"
+    importlib.reload(config)
+    try:
+        index = search_mod.build_index(store)
+        questions = [
+            ATTENTION_QUESTION,
+            f"расскажи про маршрут {attention_route}",
+            f"что можно сделать с маршрутом {options_route}",
+            OUT_OF_SCOPE_QUESTION,
+        ]
+        answers, slowest = [], 0.0
+        for question in questions:
+            started = time_mod.perf_counter()
+            answers.append(assistant_mod.ask(store, index, question))
+            slowest = max(slowest, (time_mod.perf_counter() - started) * 1000)
+
+        extra = {q: numbers_outside_evidence(a) for q, a in zip(questions, answers)}
+        dirty = {q: e for q, e in extra.items() if e}
+        tools_used = [
+            [s["tool"] for s in a["steps"]] or ["—"] for a in answers
+        ]
+        check(
+            "Гейт 19 — ассистент отвечает на те же вопросы без модели",
+            not llm.available()
+            and all(a["source"] == "deterministic" for a in answers)
+            and all(a["supported"] for a in answers[:3])
+            and answers[3]["supported"] is False
+            and not dirty
+            and slowest < MAX_ANSWER_MS,
+            f"модель выключена: {not llm.available()}; пути "
+            f"{[a['source'] for a in answers]}; инструменты {tools_used}; "
+            f"чисел вне результатов: {sum(len(e) for e in extra.values())}"
+            + (f" {dirty}" if dirty else "")
+            + f"; самый долгий ответ {slowest:.0f} мс",
+        )
+        return {"questions": questions, "answers": answers}
+    finally:
+        if previous is None:
+            os.environ.pop("QATNOV_LLM_DISABLED", None)
+        else:
+            os.environ["QATNOV_LLM_DISABLED"] = previous
+        importlib.reload(config)
+
+
 def main() -> None:
     import polars as pl
 
@@ -614,12 +807,35 @@ def main() -> None:
     gate6()
     nl = gate7(gain_stop_name)
     explained = gate8(nl["gain_result"])
-    offline = gate9(store, gain_stop_name)
+    offline_nl = gate9(store, gain_stop_name)
     gate10(store, gain_stop_name)
     gate11()
     gate12(extend_stops[0], trim["route_num"], trim["direction"], int(trim["seq"]))
     gate13()
     gate14(extend_stops, trim["route_num"], trim["direction"], max(0, int(trim["seq"]) - 1))
+
+    # маршруты для вопросов ассистента выбираются диагностикой, а не вписаны
+    # руками: пересчитались данные — гейт спрашивает про то, что стало плохим
+    from app import diagnostics, tools as tools_mod
+    from app import search as search_mod
+
+    index = search_mod.build_index(store)
+    ranked = diagnostics.attention(store, "fri", 8, 5)["routes"]
+    attention_route = ranked[0]["route_num"]
+    frame = {"weekday": "fri", "hour": 8}
+    options_route = next(
+        (
+            entry["route_num"]
+            for entry in ranked
+            if tools_mod.route_options(store, index, {**frame, "route_num": entry["route_num"]})[
+                "options"
+            ]
+        ),
+        attention_route,
+    )
+
+    assistant_answers = [gate15(), gate16(attention_route), gate17(options_route), gate18()]
+    offline = gate19(store, attention_route, options_route)
 
     print()
     print("Разобранный сценарий (фраза → объект для POST /api/scenario):")
@@ -630,8 +846,33 @@ def main() -> None:
     print(f"Объяснение результата (путь: {explained['source']}):")
     print(f"  {explained['text']}")
     print()
-    print(f"Он же при выключенной модели (путь: {offline['explained']['source']}):")
-    print(f"  {offline['explained']['text']}")
+    print(f"Он же при выключенной модели (путь: {offline_nl['explained']['source']}):")
+    print(f"  {offline_nl['explained']['text']}")
+
+    print()
+    print("=" * 100)
+    print("АССИСТЕНТ: четыре вопроса")
+    for answer in assistant_answers:
+        print("=" * 100)
+        print(
+            f"— {answer['question']} "
+            f"[{answer['source']}, {answer['took_ms']:.0f} мс, "
+            f"инструменты: {[s['tool'] for s in answer['steps']] or '—'}]"
+        )
+        print(answer["text"])
+        if answer["actions"]:
+            print(f"  действия для интерфейса: {json.dumps(answer['actions'], ensure_ascii=False)[:400]}")
+
+    print()
+    print("=" * 100)
+    print("АССИСТЕНТ: те же вопросы при выключенной модели")
+    for question, answer in zip(offline["questions"], offline["answers"]):
+        print("=" * 100)
+        print(
+            f"— {question} [{answer['source']}, {answer['took_ms']:.0f} мс, "
+            f"инструменты: {[s['tool'] for s in answer['steps']] or '—'}]"
+        )
+        print(answer["text"])
 
     passed = sum(1 for _, ok, _ in results if ok)
     print()

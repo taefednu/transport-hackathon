@@ -122,8 +122,12 @@ def build_facts(store: Store, body: dict) -> dict:
     return facts
 
 
-def render(facts: dict) -> str:
-    """Шаблонный абзац. Ни одного числа сверх тех, что в facts."""
+def render(facts: dict, with_sources: bool = True) -> str:
+    """Шаблонный абзац. Ни одного числа сверх тех, что в facts.
+
+    `with_sources=False` нужен ассистенту: он добавляет оговорку об источниках
+    сам, одну на весь ответ, и вторая копия в середине текста только мешает.
+    """
     parts: list[str] = []
     changes = facts["изменения"]
     head = "; ".join(changes) if changes else "состав маршрутов не изменился"
@@ -152,6 +156,9 @@ def render(facts: dict) -> str:
         parts.append(f"Сработали предупреждения: {listed}{tail}.")
     else:
         parts.append("Предупреждений валидатора нет.")
+
+    if not with_sources:
+        return " ".join(parts)
 
     share = facts["оговорка"]["доля_перегонов_по_медиане_города_процент"]
     share_text = (

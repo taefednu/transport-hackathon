@@ -304,7 +304,9 @@ def _resolve(index: list, query: str, kind: str) -> tuple[object | None, list[di
     return None, [search_mod.pack_entry(entry, rank) for rank, _, entry in tied[:MAX_CANDIDATES]]
 
 
-def _resolve_route(store: Store, index: list, query: str) -> tuple[str | None, list[dict]]:
+def resolve_route(store: Store, index: list, query: str) -> tuple[str | None, list[dict]]:
+    """Номер маршрута по тому, как его назвал человек. Публичная: ей же
+    пользуется ассистент, чтобы не угадывать «двадцать девятый» второй раз."""
     key = route_from_word(query.strip()) or query.strip()
     if store.routes is not None and key:
         exact = store.routes.filter(pl.col("route_num") == key)
@@ -374,7 +376,7 @@ def parse(store: Store, index: list, text: str) -> dict:
 
     route_num, route_candidates = (None, [])
     if intent["route"]:
-        route_num, route_candidates = _resolve_route(store, index, intent["route"])
+        route_num, route_candidates = resolve_route(store, index, intent["route"])
         if route_num is None:
             target = ambiguous if route_candidates else unresolved
             item = {"query": intent["route"], "role": "route"}

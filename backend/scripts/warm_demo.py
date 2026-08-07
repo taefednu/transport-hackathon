@@ -28,6 +28,15 @@ DEMO_PHRASES = (
     "поставить на восьмёрке интервал 6 минут",
 )
 
+# вопросы ассистента: каждый стоит двух вызовов модели (выбор инструмента и
+# пересказ), поэтому холодный вопрос на сцене — это пять секунд ожидания или
+# уход на шаблонный ответ по таймауту
+DEMO_QUESTIONS = (
+    "какие маршруты требуют внимания",
+    "расскажи про маршрут 29",
+    "что можно сделать с маршрутом 8",
+)
+
 
 def post(path: str, payload: dict) -> tuple[dict, float]:
     started = time.perf_counter()
@@ -65,6 +74,17 @@ def main() -> None:
         print(
             f"  абзац:  {cold_text_ms:6.0f} мс ({cold_text['source']}) → "
             f"{warm_text_ms:6.0f} мс ({warm_text['source']})"
+        )
+
+    print()
+    for question in DEMO_QUESTIONS:
+        cold, cold_ms = post("/api/assistant", {"text": question})
+        warm, warm_ms = post("/api/assistant", {"text": question})
+        print(f"«{question}»")
+        print(
+            f"  ассистент: {cold_ms:6.0f} мс ({cold['source']}) → "
+            f"{warm_ms:6.0f} мс ({warm['source']}), "
+            f"инструменты {[s['tool'] for s in warm['steps']]}"
         )
 
     cached = json.loads(urllib.request.urlopen(BASE + "/api/llm").read())["cached_answers"]
