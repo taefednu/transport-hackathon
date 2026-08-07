@@ -21,7 +21,7 @@ import math
 import numpy as np
 import polars as pl
 
-from app import config
+from app import config, dataquality
 from app.store import Store
 
 _CACHE: dict[tuple[str, int], list[dict]] = {}
@@ -268,17 +268,36 @@ def reasons(entry: dict) -> list[str]:
 
 
 def attention(store: Store, weekday: str, hour: int, limit: int) -> dict:
-    """Верхние маршруты по оценке. Маршруты без признаков не показываются."""
-    ranked = [r for r in compute(store, weekday, hour) if r["signs"]]
+    """Верхние маршруты по оценке.
+
+    Маршруты с невозможными исходными значениями в ранжирование не попадают:
+    дефект геометрии OSM иначе занимает первые строки и выглядит как худший
+    маршрут города. Они не исчезают — уходят отдельным списком с причинами,
+    и по номеру по-прежнему открываются.
+    """
+    marked = dataquality.flags(store)
+    everything = compute(store, weekday, hour)
+    ranked = [r for r in everything if r["signs"] and r["route_num"] not in marked]
     top = []
     for entry in ranked[:limit]:
         top.append({**entry, "reasons": reasons(entry)})
+    excluded = [
+        {
+            "route_num": num,
+            "reasons": list(dict.fromkeys(item["message"] for item in items)),
+        }
+        for num, items in sorted(marked.items(), key=lambda kv: kv[0])
+    ]
     return {
         "weekday": weekday,
         "hour": hour,
         "hour_label": f"{hour}:00",
-        "routes_total": len(compute(store, weekday, hour)),
+        "routes_total": len(everything),
         "routes_with_signs": len(ranked),
+        # что выпало из ранжирования и почему — признак качества данных,
+        # который интерфейс показывает рядом со списком
+        "excluded_unreliable": excluded,
+        "excluded_count": len(excluded),
         # длина списка кладётся в результат намеренно: её называют в ответе, а
         # называть можно только те числа, которые вернул инструмент
         "routes_shown": len(top),

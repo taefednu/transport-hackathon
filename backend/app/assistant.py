@@ -33,6 +33,12 @@ fmt = explain_mod._fmt
 MAX_DONE_IN_PROMPT = 2
 # час по умолчанию — утренний пик, тот же, что у /api/baseline
 DEFAULT_HOUR = 8
+# чем должен заканчиваться законченный ответ
+SENTENCE_END = (".", "!", "?", "»", ":")
+# номер пункта в начале строки — это разметка списка, а не число из расчёта.
+# Без этого «1.», «2.» в перечислении читаются охраной как выдуманные числа и
+# отправляют в шаблон совершенно правильный ответ
+LIST_MARKER = re.compile(r"^[ \t]*\d{1,2}[.)](?=\s)", re.MULTILINE)
 
 # --- определение намерения без модели -----------------------------------
 
@@ -271,13 +277,21 @@ def _render_options(result: dict) -> str:
             if option["extra_vehicles"] == 0
             else f"нужна ещё машин: {fmt(option['extra_vehicles'])}"
         )
+        # уровень уверенности говорится вслух: у остановки OSM счётчика
+        # маршрутов Яндекса нет, и её может кто-то уже обслуживать
+        caveat = (
+            " Остановка известна только по OSM, счётчика маршрутов по ней нет —"
+            " возможно, её уже кто-то обслуживает."
+            if option.get("confidence") == "osm_only"
+            else ""
+        )
         lines.append(
             f"— продлить {option['direction']} до «{option['stop_name']}» "
             f"(хвост {fmt(option['tail_km'])} км): доступ получают "
             f"{fmt(option['gained_people'])} человек, оборот "
             f"{fmt(option['cycle_time_before_min'])} → {fmt(option['cycle_time_after_min'])} мин, "
             f"машин {fmt(option['required_vehicles_before'])} → "
-            f"{fmt(option['required_vehicles_after'])}, {cost}."
+            f"{fmt(option['required_vehicles_after'])}, {cost}.{caveat}"
         )
     return "\n".join(lines)
 
@@ -358,7 +372,10 @@ RENDERERS = {
 # сформулированы словами в `reasons`, гексагоны — материал для карты, а не для
 # текста. Длинный промпт модель не успевает пересказать за таймаут
 PROMPT_DROP = {
-    "routes_attention": ("signs",),
+    # список исключённых маршрутов модели не показывается: получив его вместе
+    # с ранжированием, она выдала исключённые маршруты за ответ на вопрос
+    # «какие маршруты требуют внимания». Он добавляется к тексту кодом
+    "routes_attention": ("signs", "excluded_unreliable"),
     "scenario_effect": ("changed_hexes",),
 }
 
@@ -485,6 +502,24 @@ def _exact_directions(store: Store) -> tuple[int, int]:
     return _EXACT_SHARE or (0, 0)
 
 
+def exclusion_note(steps: list[dict]) -> str:
+    """Строка про исключённые маршруты. Собирается кодом, а не моделью.
+
+    Модели этот список не показывается (см. PROMPT_DROP), поэтому она не может
+    ни выдать его за ответ, ни потерять: он приписывается к готовому тексту.
+    """
+    for step in steps:
+        result = step.get("result") or {}
+        if step["tool"] == "routes_attention" and result.get("excluded_count"):
+            numbers = ", ".join(item["route_num"] for item in result["excluded_unreliable"])
+            return (
+                f"\n\nИз ранжирования исключены {fmt(result['excluded_count'])} маршрутов "
+                f"с невозможными исходными значениями: {numbers}. Они открываются, но "
+                "их числам доверять нельзя."
+            )
+    return ""
+
+
 def disclaimers(store: Store) -> list[str]:
     """Оговорки о качестве данных. Собираются кодом и в охрану чисел не входят."""
     out = []
@@ -571,10 +606,21 @@ def ask(
         )
 
     steps: list[dict] = []
-    path, reason = "deterministic", None
+    path, reason = "keywords", None
     refused_by_model = False
 
-    if llm.available():
+    # Инструмент выбирается ключевыми словами, а модель зовётся только тогда,
+    # когда они не сработали. Замер 08.08: обращение к модели за выбором стоит
+    # 780–1060 мс, и на понятной формулировке оно ничего не добавляет — тот же
+    # инструмент выбирается по словам за доли миллисекунды. Сэкономленная
+    # секунда уходит в бюджет пересказа, ради которого модель и нужна.
+    tool_name, params = plan_without_model(question, found)
+    if tool_name is not None:
+        steps.append(
+            run_tool(store, index, tool_name, _normalize(params, weekday, hour, question))
+        )
+
+    if not steps and llm.available():
         path = "model"
         while len(steps) < config.ASSISTANT_MAX_STEPS and left() > config.LLM_TIMEOUT_SEC:
             choice, error = choose_tool(
@@ -605,7 +651,6 @@ def ask(
                 break
             steps.append(run_tool(store, index, choice["tool"], params))
         if not steps and not refused_by_model:
-            path = "deterministic"
             reason = reason or "модель не выбрала инструмент"
 
     if refused_by_model:
@@ -624,13 +669,11 @@ def ask(
         )
 
     if not steps:
-        tool_name, params = plan_without_model(question, found)
-        if tool_name is None:
-            return done(
+        return done(
                 {
                     "text": refusal(None),
                     "source": "deterministic",
-                    "reason": "намерение не опознано",
+                    "reason": reason or "намерение не опознано",
                     "supported": False,
                     "capabilities": list(toolspecs.CAPABILITIES),
                     "steps": [],
@@ -638,9 +681,6 @@ def ask(
                     "actions": [],
                     "disclaimers": [],
                 }
-            )
-        steps.append(
-            run_tool(store, index, tool_name, _normalize(params, weekday, hour, question))
         )
 
     evidence = {
@@ -658,7 +698,7 @@ def ask(
         step.get("result") is not None for step in steps
     ):
         answer = llm.complete(
-            toolspecs.ANSWER_SYSTEM,
+            toolspecs.ANSWER_SYSTEM.format(limit=config.ANSWER_MAX_CHARS),
             toolspecs.answer_user(question, for_prompt(evidence)),
             temperature=config.LLM_TEMPERATURE_EXPLAIN,
             max_tokens=config.LLM_MAX_TOKENS_ANSWER,
@@ -666,9 +706,16 @@ def ask(
         if answer.text is None:
             reason = answer.error
         else:
-            extra = sorted(explain_mod.numbers_in(answer.text) - allowed)
+            extra = sorted(
+                explain_mod.numbers_in(LIST_MARKER.sub("", answer.text)) - allowed
+            )
             if extra:
                 reason = f"модель назвала числа, которых нет в результатах расчёта: {extra}"
+            elif not answer.text.rstrip().endswith(SENTENCE_END):
+                # потолок токенов стоит низко ради скорости, и ответ может
+                # оборваться на середине фразы. Оборванный текст человеку не
+                # отдаём — отдаём собранный кодом
+                reason = "ответ модели оборвался на середине фразы"
             else:
                 text, source, reason = answer.text, answer.source, None
     elif llm.available():
@@ -677,7 +724,7 @@ def ask(
     actions = [action for step in steps for action in actions_for(step)]
     return done(
         {
-            "text": text + "\n\nОговорки: " + "; ".join(notes) + ".",
+            "text": text + exclusion_note(steps) + "\n\nОговорки: " + "; ".join(notes) + ".",
             "source": source,
             "reason": reason,
             "supported": True,

@@ -36,6 +36,9 @@ class Store:
     headway_actual: pl.DataFrame | None = None
     holes: pl.DataFrame | None = None
     segment_routes: pl.DataFrame | None = None
+    # здания OSM: по ним разложено население и по ним же видно, стоит ли
+    # остановка у жилья или в стороне от него
+    buildings: pl.DataFrame | None = None
 
     stop_tree: cKDTree = field(init=False)
     stop_xy: np.ndarray = field(init=False)
@@ -57,6 +60,7 @@ class Store:
             ("headway_actual", self.headway_actual),
             ("holes", self.holes),
             ("segment_routes", self.segment_routes),
+            ("buildings", self.buildings),
         ):
             if value is None:
                 absent.append(name)
@@ -86,4 +90,5 @@ def load() -> Store:
         headway_actual=_read(config.HEADWAY_ACTUAL_PARQUET),
         holes=_read(config.HOLES_PARQUET),
         segment_routes=_read(config.SEGMENT_ROUTES_PARQUET),
+        buildings=_read(config.BUILDINGS_PARQUET),
     )

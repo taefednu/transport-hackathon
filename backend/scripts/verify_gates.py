@@ -569,7 +569,19 @@ def gate14(extend_stops: list[str], trim_route: str, trim_direction: str, trim_s
 # требование к ассистенту: ответ приходит меньше чем за десять секунд в самом
 # длинном сценарии. Порог один на все вопросы, поэтому и константа одна
 MAX_ANSWER_MS = 10_000
+# приемлемое время ответа ассистента из задачи: 2–4 секунды на холодную
+SPEED_TARGET_MS = 4_000
+# признак качества данных считается заранее и отдаётся из памяти
+DATA_QUALITY_MAX_MS = 1_000
 ATTENTION_QUESTION = "какие маршруты требуют внимания"
+
+# Замер до правок (08.08, тот же порядок вопросов, что в гейте 22, холодный кэш).
+# Держится здесь, чтобы «стало» печаталось рядом с «было», а не со слов.
+BEFORE_MS = (
+    {"ms": 5452, "note": "шаблон"},
+    {"ms": 5456, "note": "модель"},
+    {"ms": 5335, "note": "модель"},
+)
 OUT_OF_SCOPE_QUESTION = "какой пассажиропоток будет на 14 маршруте в следующем году"
 
 
@@ -661,6 +673,9 @@ def gate17(route_num: str) -> dict:
     if ready:
         code, body = post_status("/api/scenario", ready[0]["scenario"])
         accepted = code == 200
+        # движок отдаёт весь прирост сценария, вариант показывает ту его часть,
+        # которую даёт новая остановка: сверяем с полным числом, оно для того
+        # в варианте и хранится
         replayed = round(json.loads(body)["gained"]) if accepted else None
 
     check(
@@ -670,15 +685,15 @@ def gate17(route_num: str) -> dict:
         and options[0]["required_vehicles_after"] is not None
         and bool(ready)
         and accepted
-        and replayed == options[0]["gained_people"]
+        and replayed == options[0]["gained_with_chain_recount"]
         and not extra
         and ms < MAX_ANSWER_MS,
         f"путь: {answer['source']}; вариантов {len(options)}: продлить {route_num} "
         f"({options[0]['direction']}) до «{options[0]['stop_name']}» — "
-        f"+{options[0]['gained_people']:,} чел., машин "
+        f"+{options[0]['gained_people']:,} чел. от самой остановки, машин "
         f"{options[0]['required_vehicles_before']}→{options[0]['required_vehicles_after']}; "
         f"движок принял сценарий из действия: {accepted}, прирост при повторе "
-        f"{replayed:,} против {options[0]['gained_people']:,}; "
+        f"{replayed:,} против {options[0]['gained_with_chain_recount']:,}; "
         f"чисел вне результатов: {len(extra)}; {ms:.0f} мс"
         if options
         else f"вариантов не нашлось; {ms:.0f} мс",
@@ -759,6 +774,193 @@ def gate19(store, attention_route: str, options_route: str) -> dict:
         importlib.reload(config)
 
 
+def _route_with_options(store, index, frame: dict, fallback: str) -> str:
+    """Маршрут, у которого есть чем продлиться, — найденный, а не вписанный.
+
+    Перебирать все 165 маршрутов ради этого нельзя: каждый стоит секунды. Сперва
+    считается дешёвая подсказка — насколько близко к конечной лежит остановка с
+    непокрытым населением, — и только у лучших по ней маршрутов запрашиваются
+    варианты.
+    """
+    import numpy as np
+    import polars as pl
+
+    from app import config, scenario as scenario_mod, tools as tools_mod
+
+    potential = tools_mod._candidate_potential(store)
+    candidates, _, _ = tools_mod._unserved_candidates(store)
+    useful = [s for s in candidates if potential.get(s, 0) > 0]
+    if not useful:
+        return fallback
+
+    position = {s: i for i, s in enumerate(store.stops["stop_id"].to_list())}
+    useful_xy = np.array([store.stop_xy[position[s]] for s in useful])
+
+    scored: list[tuple[float, str]] = []
+    for row in store.routes.filter(pl.col("quality") == "exact").select(
+        "route_num", "direction", "length_km"
+    ).to_dicts():
+        try:
+            sequence = scenario_mod._route_sequence(store, row["route_num"], row["direction"])
+        except scenario_mod.ScenarioError:
+            continue
+        terminus = sequence[-1]
+        if terminus not in position or not row["length_km"]:
+            continue
+        distance = np.hypot(*(useful_xy - store.stop_xy[position[terminus]]).T) / 1000.0
+        limit = config.IMPROVEMENT_MAX_LENGTH_SHARE * float(row["length_km"])
+        within = [i for i, d in enumerate(distance) if d <= limit]
+        if within:
+            scored.append((-max(potential[useful[i]] for i in within), row["route_num"]))
+
+    for _, route_num in sorted(scored):
+        try:
+            if tools_mod.route_options(store, index, {**frame, "route_num": route_num})["options"]:
+                return route_num
+        except tools_mod.ToolError:
+            continue
+    return fallback
+
+
+def gate20(store) -> dict:
+    """Невозможные исходные значения помечены, изъяты из ранжирования и названы."""
+    from app import dataquality, tools as tools_mod
+    from app import search as search_mod
+
+    report, ms = get_json("/api/data-quality")
+    flagged = {row["route_num"] for row in report["routes"]}
+
+    answer, _ = post_json("/api/assistant", {"text": ATTENTION_QUESTION})
+    evidence = answer["evidence"].get("routes_attention") or {}
+    ranked = {r["route_num"] for r in evidence.get("routes") or []}
+    excluded = {r["route_num"] for r in evidence.get("excluded_unreliable") or []}
+
+    # помеченный маршрут обязан открываться и сам сообщать о проблеме
+    worst = sorted(flagged)[0] if flagged else None
+    index = search_mod.build_index(store)
+    profile = (
+        tools_mod.route_profile(store, index, {"weekday": "fri", "hour": 8, "route_num": worst})
+        if worst
+        else {}
+    )
+    opens = bool(profile.get("data_flags")) and profile.get("n_stops") is not None
+
+    refused = None
+    if worst:
+        try:
+            tools_mod.route_options(store, index, {"weekday": "fri", "hour": 8, "route_num": worst})
+        except tools_mod.ToolError as exc:
+            refused = str(exc)
+
+    check(
+        "Гейт 20 — невозможные значения помечены и изъяты из ранжирования",
+        bool(flagged)
+        and all(row["reasons"] for row in report["routes"])
+        and not (flagged & ranked)
+        and excluded == flagged
+        and opens
+        and refused is not None
+        and ms < DATA_QUALITY_MAX_MS,
+        f"помечено маршрутов {report['routes_flagged']} из {report['routes_total']}, "
+        f"проверок {len(report['checks'])}; в ранжирование не попал ни один: "
+        f"{not (flagged & ranked)}; список исключённых в ответе совпадает с реестром: "
+        f"{excluded == flagged}; маршрут {worst} открывается и сообщает "
+        f"{len(profile.get('data_flags') or [])} пометки; из подбора исключён: "
+        f"{refused is not None}; {ms:.0f} мс",
+    )
+    return report
+
+
+def gate21(store, route_num: str) -> None:
+    """Рекомендации не ведут к остановкам без застройки вокруг."""
+    from app import config, dataquality, tools as tools_mod
+    from app import search as search_mod
+
+    index = search_mod.build_index(store)
+    result = tools_mod.route_options(
+        store, index, {"weekday": "fri", "hour": 8, "route_num": route_num}
+    )
+    housing = dataquality.housing_near_stops(store)
+    targets = [option["stop_id"] for option in result["options"]]
+    minerva_in = "Y02400" in targets
+    poor = [s for s in targets if housing.get(s, 0) < config.MIN_HOUSING_BUILDINGS]
+
+    # Minerva City TJM обязана быть отсеяна самим признаком, а не списком имён
+    minerva_dropped = dataquality.stop_is_off_housing(store, "Y02400")
+    attributed = all(
+        option["gained_people"]
+        == option["gained_with_chain_recount"] - option["chain_recount_people"]
+        for option in result["options"]
+    )
+    check(
+        "Гейт 21 — рекомендации не ведут к остановкам без застройки",
+        bool(result["options"])
+        and not minerva_in
+        and not poor
+        and minerva_dropped
+        and attributed,
+        f"вариантов {len(result['options'])}, целей без жилья среди них {len(poor)}; "
+        f"Minerva City TJM отсеяна признаком застройки: {minerva_dropped} "
+        f"(жилых зданий в {int(config.HOUSING_RADIUS_M)} м: {housing.get('Y02400')}, "
+        f"порог {config.MIN_HOUSING_BUILDINGS}); всего отсеяно кандидатов "
+        f"{result['candidates_off_housing']}; прирост отделён от пересчёта цепочки: "
+        f"{attributed}; жильё у предложенных целей: "
+        f"{[housing.get(s) for s in targets]}",
+    )
+
+
+def gate22(store, route_num: str) -> dict:
+    """Скорость ассистента на холодную: модельный путь в 2–4 секунды.
+
+    Замер идёт в этом процессе с очищенным кэшем: только так «на холодную»
+    означает холодную. Живой сервер к этому моменту уже отвечал на те же
+    вопросы, и его кэш измерил бы сам себя.
+    """
+    import time as time_mod
+
+    from app import assistant as assistant_mod, llm
+    from app import search as search_mod
+
+    index = search_mod.build_index(store)
+    questions = [
+        ATTENTION_QUESTION,
+        f"расскажи про маршрут {route_num}",
+        "где в городе люди без транспорта",
+    ]
+    measured = []
+    for question in questions:
+        llm.clear_cache()
+        started = time_mod.perf_counter()
+        answer = assistant_mod.ask(store, index, question)
+        elapsed = (time_mod.perf_counter() - started) * 1000
+        tool_ms = sum(step["took_ms"] for step in answer["steps"])
+        measured.append(
+            {
+                "question": question,
+                "ms": elapsed,
+                "tool_ms": tool_ms,
+                "model_ms": elapsed - tool_ms,
+                "source": answer["source"],
+                "chars": len(answer["text"]),
+                "reason": answer["reason"],
+            }
+        )
+
+    flagship = measured[0]
+    check(
+        "Гейт 22 — флагманский вопрос отвечает моделью за 2–4 секунды на холодную",
+        flagship["source"] in ("model", "cache")
+        and flagship["ms"] < SPEED_TARGET_MS
+        and all(m["ms"] < MAX_ANSWER_MS for m in measured),
+        "; ".join(
+            f"«{m['question'][:28]}» {m['ms']:.0f} мс ({m['source']}, инструмент "
+            f"{m['tool_ms']:.0f} мс, модель {m['model_ms']:.0f} мс, {m['chars']} знаков)"
+            for m in measured
+        ),
+    )
+    return {"measured": measured}
+
+
 def main() -> None:
     import polars as pl
 
@@ -823,19 +1025,13 @@ def main() -> None:
     ranked = diagnostics.attention(store, "fri", 8, 5)["routes"]
     attention_route = ranked[0]["route_num"]
     frame = {"weekday": "fri", "hour": 8}
-    options_route = next(
-        (
-            entry["route_num"]
-            for entry in ranked
-            if tools_mod.route_options(store, index, {**frame, "route_num": entry["route_num"]})[
-                "options"
-            ]
-        ),
-        attention_route,
-    )
+    options_route = _route_with_options(store, index, frame, attention_route)
 
     assistant_answers = [gate15(), gate16(attention_route), gate17(options_route), gate18()]
     offline = gate19(store, attention_route, options_route)
+    quality = gate20(store)
+    gate21(store, options_route)
+    speed = gate22(store, attention_route)
 
     print()
     print("Разобранный сценарий (фраза → объект для POST /api/scenario):")
@@ -848,6 +1044,35 @@ def main() -> None:
     print()
     print(f"Он же при выключенной модели (путь: {offline_nl['explained']['source']}):")
     print(f"  {offline_nl['explained']['text']}")
+
+    print()
+    print("=" * 100)
+    print("ОТФИЛЬТРОВАНО: невозможные исходные значения")
+    print(
+        f"помечено {quality['routes_flagged']} маршрутов из {quality['routes_total']}; "
+        "записи не удалены, маршруты открываются, но изъяты из ранжирования и подбора"
+    )
+    for row in quality["routes"]:
+        print(f"  маршрут {row['route_num']}:")
+        for reason in row["reasons"]:
+            print(f"      — {reason}")
+
+    print()
+    print("=" * 100)
+    print("ВРЕМЯ ОТВЕТА АССИСТЕНТА: до и после")
+    print(f"{'вопрос':34} {'было':>26}   {'стало':>34}")
+    for name, before, after in zip(
+        (m["question"] for m in speed["measured"]), BEFORE_MS, speed["measured"]
+    ):
+        print(
+            f"{name[:34]:34} {before['ms']:6.0f} мс ({before['note']:>11})   "
+            f"{after['ms']:6.0f} мс ({after['source']}, инструмент {after['tool_ms']:.0f} мс, "
+            f"модель {after['model_ms']:.0f} мс)"
+        )
+    print(
+        "  замер «было» сделан 08.08 до правок: выбор инструмента моделью 780–1060 мс "
+        "плюс пересказ, который не укладывался в таймаут 5 с"
+    )
 
     print()
     print("=" * 100)

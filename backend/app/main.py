@@ -16,12 +16,15 @@ from app import (
     assistant as assistant_mod,
     config,
     coverage,
+    dataquality,
+    diagnostics,
     explain as explain_mod,
     llm,
     nlparse,
     scenario,
     schedule,
     search as search_mod,
+    tools,
     validation,
 )
 from app import trace
@@ -34,6 +37,14 @@ STATE: dict[str, Store] = {}
 async def lifespan(app: FastAPI):
     STATE["store"] = load()
     STATE["search_index"] = search_mod.build_index(STATE["store"])
+    # то, что иначе посчитается внутри первого же запроса и попадёт в его время:
+    # пометки качества данных, застройка вокруг остановок, диагностика на
+    # утренний пик и потолок прироста по кандидатам. Вместе это около 0.5 с —
+    # на старте они бесплатны, в ответе ассистента они заметны
+    dataquality.flags(STATE["store"])
+    dataquality.housing_near_stops(STATE["store"])
+    diagnostics.compute(STATE["store"], config.WEEKDAY_TYPES[0], 8)
+    tools.warm(STATE["store"])
     yield
     STATE.clear()
 
@@ -422,6 +433,34 @@ def baseline(
     return coverage.baseline(store(), weekday, hour)
 
 
+@app.get("/api/headways")
+def headways(
+    weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
+    hour: int = Query(default=8, ge=0, le=23),
+) -> dict:
+    """Фактический интервал и число машин по всем маршрутам за один час.
+
+    Отдельно от `/api/routes`, потому что список маршрутов от часа не зависит
+    и грузится один раз, а эти два числа меняются при каждом сдвиге часа.
+    Маршруты, по которым за этот час нет ни одного рейса в транзакциях,
+    в ответе отсутствуют — их интервал неизвестен, а не равен нулю.
+    """
+    if weekday not in config.WEEKDAY_TYPES:
+        raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
+    st = store()
+    if st.headway_actual is None:
+        raise HTTPException(503, "нет data/build/headway_actual.parquet (шаг 6 пайплайна)")
+    rows = st.headway_actual.filter(
+        (pl.col("weekday_type") == weekday) & (pl.col("hour") == hour)
+    ).select("route_num", "actual_headway_min", "n_vehicles", "n_boardings")
+    return {
+        "weekday": weekday,
+        "hour": hour,
+        "count": rows.height,
+        "routes": {r["route_num"]: r for r in rows.to_dicts()},
+    }
+
+
 @app.post("/api/scenario")
 def post_scenario(body: dict) -> dict:
     weekday = body.get("weekday", config.WEEKDAY_TYPES[0])
@@ -454,6 +493,16 @@ def explain(body: dict) -> dict:
     if not isinstance(body, dict) or not body:
         raise HTTPException(422, "нужно тело с результатом сценария")
     return explain_mod.explain(store(), body)
+
+
+@app.get("/api/data-quality")
+def data_quality() -> dict:
+    """Что в исходных данных физически невозможно и чему нельзя доверять.
+
+    Записи не удалены: маршрут открывается и показывает свои числа. Из
+    ранжирования диагностики и из подбора рекомендаций он исключён.
+    """
+    return dataquality.report(store())
 
 
 @app.post("/api/assistant")

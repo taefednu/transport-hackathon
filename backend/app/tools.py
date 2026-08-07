@@ -17,6 +17,7 @@ import polars as pl
 from app import (
     config,
     coverage,
+    dataquality,
     diagnostics,
     explain as explain_mod,
     nlparse,
@@ -154,6 +155,13 @@ def route_profile(store: Store, index: list, params: dict) -> dict:
         # доля перегонов, для которых реального трафика не нашлось
         "segments_at_city_speed_percent": fallback_share,
         "warnings": list(dict.fromkeys(w["message"] for w in warnings)),
+        # маршрут с невозможными исходными значениями открывается и показывает
+        # свои числа, но обязан сказать, чему в них нельзя доверять
+        "data_flags": list(
+            dict.fromkeys(
+                item["message"] for item in dataquality.flags(store).get(route_num, [])
+            )
+        ),
         "attention": next(
             (
                 {"score": r["score"], "reasons": diagnostics.reasons(r)}
@@ -165,24 +173,104 @@ def route_profile(store: Store, index: list, params: dict) -> dict:
     }
 
 
-def _unserved_candidates(store: Store) -> list[str]:
-    """Остановки, про которые известно, что их никто не обслуживает.
+def _unserved_candidates(store: Store) -> tuple[list[str], dict[str, str], list[str]]:
+    """Цели продления, их уровень уверенности и отсеянные без застройки.
 
-    Критерий тот же, что в knowledge/decisions.md: счётчик маршрутов Яндекса
-    равен нулю и остановки нет ни в одной цепочке. У остановок OSM счётчика
-    не существует, их ноль означает «не знаем», поэтому они сюда не попадают.
+    Уверенность разная, и её нельзя прятать:
+
+    - `yandex_confirmed` — счётчик маршрутов Яндекса равен нулю и остановки нет
+      ни в одной цепочке (критерий из knowledge/decisions.md). Про такую
+      остановку мы знаем, что её никто не обслуживает;
+    - `osm_only` — остановка есть в OSM и её нет ни в одной восстановленной
+      цепочке, но счётчика Яндекса по ней не существует. Возможно, её уже
+      кто-то обслуживает: точный порядок остановок восстановлен у 117
+      направлений из 223.
+
+    Второй пул нужен не для полноты. Замер 08.08: из двенадцати остановок, чьё
+    продление вообще способно добавить покрытие, одиннадцать — из OSM, а
+    единственная яндексовская стоит без застройки. Оставить только первый пул —
+    значит не иметь ни одной рекомендации.
+
+    Отдельно отсеиваются остановки без жилья вокруг. Прирост считается по
+    гексагонам в 500 м пешком, а ячейка H3 r8 — это 0.88 км²: остановка на
+    пустыре получает людей, которые живут на дальнем краю ячейки.
     """
     if store.route_stops is None:
-        return []
+        return [], {}, []
     in_chain = set(store.route_stops["stop_id"].to_list())
-    return (
-        store.stops.filter(
-            (pl.col("n_routes") == 0)
-            & (pl.col("source") == "yandex")
-            & ~pl.col("stop_id").is_in(list(in_chain))
-        )["stop_id"]
-        .to_list()
-    )
+    pool = store.stops.filter(
+        (pl.col("n_routes") == 0) & ~pl.col("stop_id").is_in(list(in_chain))
+    ).select("stop_id", "source")
+
+    keep, confidence, dropped = [], {}, []
+    for row in pool.iter_rows(named=True):
+        stop_id = row["stop_id"]
+        if dataquality.stop_is_off_housing(store, stop_id):
+            dropped.append(stop_id)
+            continue
+        keep.append(stop_id)
+        confidence[stop_id] = (
+            "yandex_confirmed" if row["source"] == "yandex" else "osm_only"
+        )
+    return keep, confidence, dropped
+
+
+def _chain_baseline(store: Store, route_num: str, direction: str, sequence: list[str]) -> float:
+    """Сколько людей получает доступ от одного пересчёта цепочки маршрута.
+
+    Движок считает обслуживаемыми все остановки изменённого маршрута. Если в
+    цепочке есть остановки, у которых счётчик Яндекса показывает ноль, они
+    становятся обслуживаемыми при **любом** сценарии по этому маршруту — и их
+    людей нельзя приписывать продлению. У маршрута 1 таких остановок 15, и они
+    давали одинаковые «+595 человек» трём разным целям продления.
+    """
+    served, before, population = _coverage_base(store)
+    after = coverage.covered_hexes(store, served | set(sequence))
+    return sum(population.get(cell, 0.0) for cell in after - before)
+
+
+_BASE: dict[int, tuple[set[str], set[str], dict[str, float]]] = {}
+
+
+def _coverage_base(store: Store):
+    """Обслуживаемые остановки, покрытые гексагоны и население — один раз."""
+    key = id(store)
+    if key not in _BASE:
+        served = coverage.served_stop_ids(store)
+        _BASE[key] = (
+            served,
+            coverage.covered_hexes(store, served),
+            dict(zip(store.hexes["h3_id"].to_list(), store.hexes["population"].to_list())),
+        )
+    return _BASE[key]
+
+
+_POTENTIAL: dict[int, dict[str, float]] = {}
+
+
+def _candidate_potential(store: Store) -> dict[str, float]:
+    """Остановка-кандидат → сколько людей она вообще может добавить.
+
+    Считается один раз операциями над множествами: гексагоны в пешей
+    доступности остановки, которые сейчас никто не покрывает. Это потолок
+    прироста, а не сам прирост — движок всё равно считает каждый вариант
+    целиком. Нужно затем, чтобы перебирать не пять ближайших к конечной
+    остановок, а пять самых полезных: ближайшие почти всегда стоят в уже
+    покрытых кварталах, и перебор впустую тратит и время, и варианты.
+    """
+    key = id(store)
+    if key in _POTENTIAL:
+        return _POTENTIAL[key]
+
+    _, covered, population = _coverage_base(store)
+    gain: dict[str, float] = {}
+    for stop_id, cell in zip(
+        store.stop_hexes["stop_id"].to_list(), store.stop_hexes["h3_id"].to_list()
+    ):
+        if cell not in covered:
+            gain[stop_id] = gain.get(stop_id, 0.0) + population.get(cell, 0.0)
+    _POTENTIAL[key] = gain
+    return gain
 
 
 def route_options(store: Store, index: list, params: dict) -> dict:
@@ -190,7 +278,15 @@ def route_options(store: Store, index: list, params: dict) -> dict:
     route_num = _require_route(store, params)
     weekday, hour = params["weekday"], params["hour"]
 
-    candidates = _unserved_candidates(store)
+    marked = dataquality.flags(store).get(route_num)
+    if marked:
+        raise ToolError(
+            f"маршрут {route_num} исключён из подбора: "
+            + "; ".join(dict.fromkeys(item["message"] for item in marked))
+            + ". Считать по этим данным цену продления нельзя"
+        )
+
+    candidates, confidence, off_housing = _unserved_candidates(store)
     if not candidates:
         raise ToolError("нет остановок, про которые известно, что их никто не обслуживает")
 
@@ -201,6 +297,7 @@ def route_options(store: Store, index: list, params: dict) -> dict:
         for row in store.stops.select("stop_id", "lat", "lon").iter_rows(named=True)
     }
     candidate_xy = np.array([store.stop_xy[stop_index[s]] for s in candidates])
+    potential = _candidate_potential(store)
 
     options, skipped = [], []
     for direction in _directions(store, route_num, params.get("direction")):
@@ -220,10 +317,15 @@ def route_options(store: Store, index: list, params: dict) -> dict:
         distances = (
             np.hypot(*(candidate_xy - store.stop_xy[stop_index[terminus]]).T) / 1000.0
         )
-        for position in np.argsort(distances)[: config.IMPROVEMENT_CANDIDATES]:
+        # сначала отсекаем по длине хвоста, потом берём самых полезных из
+        # оставшихся: перебирать ближайших бессмысленно, они стоят в кварталах,
+        # которые уже кто-то обслуживает
+        limit_km = config.IMPROVEMENT_MAX_LENGTH_SHARE * float(length_km)
+        reachable = [i for i in range(len(candidates)) if distances[i] <= limit_km]
+        reachable.sort(key=lambda i: -potential.get(candidates[i], 0.0))
+        baseline = _chain_baseline(store, route_num, direction, sequence)
+        for position in reachable[: config.IMPROVEMENT_CANDIDATES]:
             tail_km = float(distances[position])
-            if tail_km > config.IMPROVEMENT_MAX_LENGTH_SHARE * float(length_km):
-                continue
             stop_id = candidates[position]
             body = {
                 "weekday": weekday,
@@ -245,7 +347,12 @@ def route_options(store: Store, index: list, params: dict) -> dict:
             affected = result["affected_routes"][0]
             before = affected.get("required_vehicles_before")
             after = affected.get("required_vehicles_after")
-            if before is None or after is None or result["gained"] <= 0:
+            if before is None or after is None:
+                continue
+            # прирост, который даёт именно новая остановка, а не пересчёт
+            # цепочки: приписывать продлению чужих людей нельзя
+            attributable = result["gained"] - baseline
+            if attributable <= 0:
                 continue
             if after - before > config.IMPROVEMENT_MAX_EXTRA_VEHICLES:
                 continue
@@ -256,10 +363,13 @@ def route_options(store: Store, index: list, params: dict) -> dict:
                     "action": "продлить до остановки",
                     "stop_id": stop_id,
                     "stop_name": names.get(stop_id) or stop_id,
+                    "confidence": confidence.get(stop_id),
                     "lat": coords[stop_id][0],
                     "lon": coords[stop_id][1],
                     "tail_km": round(tail_km, 2),
-                    "gained_people": int(round(result["gained"])),
+                    "gained_people": int(round(attributable)),
+                    "gained_with_chain_recount": int(round(result["gained"])),
+                    "chain_recount_people": int(round(baseline)),
                     "lost_people": int(round(result["lost"])),
                     "cycle_time_before_min": round(affected["cycle_time_before"], 1),
                     "cycle_time_after_min": round(affected["cycle_time_after"], 1),
@@ -279,11 +389,15 @@ def route_options(store: Store, index: list, params: dict) -> dict:
         "options": options[: config.ASSISTANT_OPTIONS_LIMIT],
         "options_found": len(options),
         "candidates_checked": len(candidates),
+        "candidates_off_housing": len(off_housing),
+        "housing_radius_m": int(config.HOUSING_RADIUS_M),
+        "min_housing_buildings": config.MIN_HOUSING_BUILDINGS,
         "max_extra_vehicles": config.IMPROVEMENT_MAX_EXTRA_VEHICLES,
         "skipped": skipped,
         "note": (
-            "варианты — продления до остановок, которые сейчас никто не обслуживает; "
-            "хвост до новой остановки считается по прямой и по медианной скорости города"
+            "варианты — продления до остановок, которые сейчас никто не обслуживает и "
+            "вокруг которых есть жильё; хвост до новой остановки считается по прямой "
+            "и по медианной скорости города"
         ),
     }
 
@@ -404,6 +518,13 @@ def find(store: Store, index: list, params: dict) -> dict:
             for s in found["stops"]
         ],
     }
+
+
+def warm(store: Store) -> None:
+    """Посчитать то, что иначе посчитается внутри первого запроса."""
+    _coverage_base(store)
+    _candidate_potential(store)
+    _unserved_candidates(store)
 
 
 REGISTRY = {
