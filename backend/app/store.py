@@ -68,7 +68,7 @@ def load() -> Store:
         config.STOPS_PARQUET,
         config.STOP_HEXES_PARQUET,
         config.HEX_ACCESS_PARQUET,
-        config.HEXES_PARQUET,
+        config.ACTIVE_HEXES_PARQUET,
     ):
         if not required.exists():
             raise RuntimeError(f"нет артефакта пайплайна: {required}")
@@ -77,7 +77,7 @@ def load() -> Store:
         stops=pl.read_parquet(config.STOPS_PARQUET),
         stop_hexes=pl.read_parquet(config.STOP_HEXES_PARQUET),
         hex_access=pl.read_parquet(config.HEX_ACCESS_PARQUET),
-        hexes=pl.read_parquet(config.HEXES_PARQUET),
+        hexes=pl.read_parquet(config.ACTIVE_HEXES_PARQUET),
         walk_graph=WalkGraph.load(config.WALK_GRAPH_PKL),
         routes=_read(config.ROUTES_PARQUET),
         route_stops=_read(config.ROUTE_STOPS_PARQUET),

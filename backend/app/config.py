@@ -48,6 +48,10 @@ STOP_HEXES_PARQUET = DATA_BUILD / "stop_hexes.parquet"
 HEX_ACCESS_PARQUET = DATA_BUILD / "hex_access.parquet"
 WALK_GRAPH_PKL = DATA_BUILD / "walk_graph.pkl"
 HEXES_PARQUET = DATA_BUILD / "hexes.parquet"
+# альтернативный слой населения: контрольная численность, разложенная по
+# застройке OSM (scripts/03b_population_buildings.py)
+HEXES_BUILDINGS_PARQUET = DATA_BUILD / "hexes_buildings.parquet"
+BUILDINGS_PARQUET = DATA_BUILD / "buildings.parquet"
 ROUTES_PARQUET = DATA_BUILD / "routes.parquet"
 ROUTE_STOPS_PARQUET = DATA_BUILD / "route_stops.parquet"
 SEGMENT_SPEED_PARQUET = DATA_BUILD / "segment_speed.parquet"
@@ -132,6 +136,24 @@ TRANSACTION_DATE_TO_WEEKDAY = {
 # официальной статистики примерно на 18% (knowledge/facts.md §7)
 POPULATION_LAYER_DATE = "01.11.2023"
 
+# --- какой слой населения читает сервер ---------------------------------
+# "kontur" — выданный Kontur Population как есть;
+# "buildings" — контрольная численность, разложенная по застройке OSM.
+# Kontur внутри города распределён неправдоподобно (facts.md §9), поэтому
+# альтернатива существует; переключение — только этой константой.
+POPULATION_SOURCE = os.environ.get("QATNOV_POPULATION_SOURCE", "kontur").strip().lower()
+ACTIVE_HEXES_PARQUET = (
+    HEXES_BUILDINGS_PARQUET if POPULATION_SOURCE == "buildings" else HEXES_PARQUET
+)
+# контрольная численность для слоя по застройке: постоянное население
+# г. Ташкент на 01.01.2026, Нацкомстат (knowledge/facts.md §3)
+POPULATION_CONTROL = float(os.environ.get("QATNOV_POPULATION_CONTROL", "3178100"))
+POPULATION_CONTROL_DATE = "01.01.2026"
+# корзины площади пятна здания для восстановления этажности: `building:levels`
+# проставлен у 93% многоквартирных домов и лишь у 6% индивидуальных, причём
+# у крупных. Внутри корзины размеченное и неразмеченное здание сопоставимы.
+BUILDING_AREA_BINS_M2 = (80.0, 120.0, 180.0, 250.0, 400.0, 700.0, 1200.0, 3000.0)
+
 # --- YandexGPT ----------------------------------------------------------
 # Yandex AI Studio, Foundation Models v1. Адрес и имена полей сверены с
 # официальными proto yandex-cloud/cloudapi (см. knowledge/decisions.md).
@@ -155,6 +177,17 @@ LLM_MAX_TOKENS_PARSE = 400
 LLM_MAX_TOKENS_EXPLAIN = 700
 # кэш ответов на время демонстрации: одна фраза не должна стоить двух запросов
 LLM_CACHE_SIZE = 256
+
+# --- доступ из браузера -------------------------------------------------
+# фронтенд живёт на своём порту, поэтому запросы к ядру — кросс-доменные.
+# Список задаётся переменной окружения через запятую; по умолчанию — dev-сервер Vite.
+CORS_ORIGINS = tuple(
+    origin.strip()
+    for origin in os.environ.get(
+        "QATNOV_CORS_ORIGINS", "http://localhost:5175,http://127.0.0.1:5175"
+    ).split(",")
+    if origin.strip()
+)
 
 # --- сеть -------------------------------------------------------------
 # типы дорог, по которым ходит пешеход (ТЗ шаг 2)
