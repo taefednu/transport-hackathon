@@ -32,6 +32,7 @@ class Store:
     routes: pl.DataFrame | None = None
     route_stops: pl.DataFrame | None = None
     segment_time: pl.DataFrame | None = None
+    city_speed: pl.DataFrame | None = None
     headway_actual: pl.DataFrame | None = None
     holes: pl.DataFrame | None = None
     segment_routes: pl.DataFrame | None = None
@@ -52,6 +53,7 @@ class Store:
             ("routes", self.routes),
             ("route_stops", self.route_stops),
             ("segment_time", self.segment_time),
+            ("city_speed", self.city_speed),
             ("headway_actual", self.headway_actual),
             ("holes", self.holes),
             ("segment_routes", self.segment_routes),
@@ -80,6 +82,7 @@ def load() -> Store:
         routes=_read(config.ROUTES_PARQUET),
         route_stops=_read(config.ROUTE_STOPS_PARQUET),
         segment_time=_read(config.SEGMENT_TIME_PARQUET),
+        city_speed=_read(config.CITY_SPEED_FALLBACK_PARQUET),
         headway_actual=_read(config.HEADWAY_ACTUAL_PARQUET),
         holes=_read(config.HOLES_PARQUET),
         segment_routes=_read(config.SEGMENT_ROUTES_PARQUET),

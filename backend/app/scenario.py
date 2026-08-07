@@ -170,6 +170,67 @@ def tail_geometry(store: Store, route_num: str, direction: str, seq: list[str]) 
     }
 
 
+def _schedule_cost(
+    store: Store,
+    route_num: str,
+    direction: str,
+    weekday: str,
+    base_seq: list[str],
+    new_seq: list[str],
+    schedules: dict[str, dict],
+    warnings: list[dict],
+) -> dict:
+    """Оборот и потребность в машинах до и после изменения цепочки остановок.
+
+    Обе стороны считаются одним и тем же способом — по цепочке, а не одна по
+    цепочке, а другая по заранее посчитанной матрице: иначе сравнивались бы
+    числа, полученные по-разному.
+
+    «Текущее число машин» берётся из операции `set_schedule`, если она есть,
+    иначе — сколько машин требует маршрут сегодня. Именно с этим числом
+    сравнивается новая потребность, поэтому продление, которому не хватает
+    машин, выдаёт предупреждение.
+    """
+    if store.routes is None:
+        return {}
+    row = store.routes.filter(
+        (pl.col("route_num") == route_num) & (pl.col("direction") == direction)
+    )
+    if row.is_empty():
+        return {}
+    route = row.to_dicts()[0]
+    params = schedules.get(route_num) or {}
+
+    headway = params.get("headway_min") or route.get("planned_headway_min")
+    first = params.get("first_departure") or route.get(f"work_start_{weekday}")
+    if not headway or not first:
+        return {}
+
+    work_end = route.get(f"work_end_{weekday}")
+    before = schedule.build(
+        store, route_num, direction, weekday, first, float(headway), None, work_end, base_seq
+    )
+    after = schedule.build(
+        store, route_num, direction, weekday, first, float(headway), None, work_end, new_seq
+    )
+    if not before.get("available") or not after.get("available"):
+        return {}
+
+    have = params.get("n_vehicles") or before["required_vehicles"]
+    warnings.extend(validation.schedule_warnings({**after, "n_vehicles": have}, route, weekday))
+    return {
+        "headway_min": float(headway),
+        "one_way_before_min": before["one_way_min"],
+        "one_way_after_min": after["one_way_min"],
+        "cycle_time_before": before["cycle_time_min"],
+        "cycle_time_after": after["cycle_time_min"],
+        "required_vehicles_before": before["required_vehicles"],
+        "required_vehicles_after": after["required_vehicles"],
+        "n_vehicles": have,
+        "segments_at_city_speed": after["segments_at_city_speed"],
+    }
+
+
 def run(store: Store, weekday: str, hour: int, ops: list[dict]) -> dict:
     started = time.perf_counter()
 
@@ -201,19 +262,29 @@ def run(store: Store, weekday: str, hour: int, ops: list[dict]) -> dict:
     affected, warnings, geometry = [], [], {}
     for (route_num, direction), seq in sequences.items():
         base_seq = _route_sequence(store, route_num, direction)
-        affected.append(
-            {
-                "route_num": route_num,
-                "direction": direction,
-                "n_stops_before": len(base_seq),
-                "n_stops_after": len(seq),
-            }
+        entry = {
+            "route_num": route_num,
+            "direction": direction,
+            "n_stops_before": len(base_seq),
+            "n_stops_after": len(seq),
+        }
+        # изменение цепочки остановок меняет и стоимость: время оборота и число
+        # машин, которое нужно, чтобы держать интервал. Без этого продление
+        # выглядит бесплатным, а правило про нехватку машин не срабатывает
+        entry.update(
+            _schedule_cost(store, route_num, direction, weekday, base_seq, seq, schedules, warnings)
         )
+        affected.append(entry)
         geom = tail_geometry(store, route_num, direction, seq)
         if geom:
             geometry[f"{route_num}:{direction}"] = geom
 
+    changed_routes = {num for num, _ in sequences}
     for route_num, params in schedules.items():
+        # маршрут, у которого поменялась цепочка, уже посчитан выше — там же
+        # учтены и параметры расписания, второй записи о нём быть не должно
+        if route_num in changed_routes:
+            continue
         row = store.routes.filter(pl.col("route_num") == route_num) if store.routes is not None else None
         if row is None or row.is_empty():
             continue

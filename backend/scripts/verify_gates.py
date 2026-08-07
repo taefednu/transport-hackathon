@@ -513,6 +513,59 @@ def gate13() -> None:
     )
 
 
+def gate14(extend_stops: list[str], trim_route: str, trim_direction: str, trim_seq: int) -> None:
+    """Изменение цепочки остановок меняет и стоимость, а не только покрытие."""
+    grown, _ = post_json(
+        "/api/scenario",
+        {
+            "weekday": "fri",
+            "hour": 8,
+            "ops": [
+                {
+                    "type": "extend_route",
+                    "route_num": "14",
+                    "direction": "fwd",
+                    "stops": extend_stops,
+                }
+            ],
+        },
+    )
+    cut, ms = post_json(
+        "/api/scenario",
+        {
+            "weekday": "fri",
+            "hour": 8,
+            "ops": [
+                {
+                    "type": "trim_route",
+                    "route_num": trim_route,
+                    "direction": trim_direction,
+                    "until_seq": trim_seq,
+                }
+            ],
+        },
+    )
+    a = grown["affected_routes"][0]
+    b = cut["affected_routes"][0]
+    codes = {w["code"] for w in grown["warnings"]}
+    check(
+        "Гейт 14 — продление стоит машин, обрезка их высвобождает",
+        a["cycle_time_after"] > a["cycle_time_before"]
+        and a["required_vehicles_after"] > a["required_vehicles_before"]
+        and "vehicles_short" in codes
+        and b["cycle_time_after"] < b["cycle_time_before"]
+        and b["required_vehicles_after"] <= b["required_vehicles_before"],
+        f"продление 14 на {len(extend_stops)} остановки: оборот "
+        f"{a['cycle_time_before']:.1f}→{a['cycle_time_after']:.1f} мин, машин "
+        f"{a['required_vehicles_before']}→{a['required_vehicles_after']} при "
+        f"{a['n_vehicles']} на линии, перегонов по медиане города "
+        f"{a['segments_at_city_speed']}, предупреждение о нехватке: "
+        f"{'vehicles_short' in codes}; обрезка {trim_route}: оборот "
+        f"{b['cycle_time_before']:.1f}→{b['cycle_time_after']:.1f} мин, машин "
+        f"{b['required_vehicles_before']}→{b['required_vehicles_after']}; {ms:.0f} мс",
+    )
+
+
 def main() -> None:
     import polars as pl
 
@@ -566,6 +619,7 @@ def main() -> None:
     gate11()
     gate12(extend_stops[0], trim["route_num"], trim["direction"], int(trim["seq"]))
     gate13()
+    gate14(extend_stops, trim["route_num"], trim["direction"], max(0, int(trim["seq"]) - 1))
 
     print()
     print("Разобранный сценарий (фраза → объект для POST /api/scenario):")
