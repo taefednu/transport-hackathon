@@ -8,7 +8,7 @@ import polars as pl
 import shapely
 from fastapi import FastAPI, HTTPException, Query
 
-from app import config, coverage, schedule, validation
+from app import config, coverage, scenario, schedule, validation
 from app.store import Store, load
 
 STATE: dict[str, Store] = {}
@@ -230,3 +230,16 @@ def baseline(
     if weekday not in config.WEEKDAY_TYPES:
         raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
     return coverage.baseline(store(), weekday, hour)
+
+
+@app.post("/api/scenario")
+def post_scenario(body: dict) -> dict:
+    weekday = body.get("weekday", config.WEEKDAY_TYPES[0])
+    hour = int(body.get("hour", 8))
+    ops = body.get("ops") or []
+    if not isinstance(ops, list) or not ops:
+        raise HTTPException(422, "нужен непустой список ops")
+    try:
+        return scenario.run(store(), weekday, hour, ops)
+    except scenario.ScenarioError as exc:
+        raise HTTPException(422, str(exc)) from exc

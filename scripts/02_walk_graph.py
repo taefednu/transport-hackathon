@@ -123,12 +123,13 @@ def main() -> None:
     rows_stop, rows_hex, rows_dist = [], [], []
     for stop_id, node in zip(stops["stop_id"].to_list(), snap_idx):
         reached = graph.reachable(int(node), WALK_LIMIT_M)
-        # до гексагона идём столько, сколько до ближайшей его вершины
-        best: dict[str, float] = {}
+        # расстояние до гексагона — медиана по его вершинам, а не минимум:
+        # минимум почти всегда ноль, потому что остановка сама стоит на вершине
+        per_cell: dict[str, list[float]] = {}
         for n, dist_m in reached.items():
             cell = h3.latlng_to_cell(float(lat[n]), float(lon[n]), H3_RESOLUTION)
-            if dist_m < best.get(cell, float("inf")):
-                best[cell] = dist_m
+            per_cell.setdefault(cell, []).append(dist_m)
+        best = {cell: float(np.median(v)) for cell, v in per_cell.items()}
         rows_stop.extend([stop_id] * len(best))
         rows_hex.extend(best.keys())
         rows_dist.extend(best.values())
@@ -146,37 +147,45 @@ def main() -> None:
     print(f"уникальных гексагонов в зонах доступности: {stop_hexes['h3_id'].n_unique()}")
 
     # расстояние по сети до ближайшей остановки для каждой вершины графа:
-    # без него «время до остановки» меряется до края гексагона и вырождается в ноль
-    node_dist, node_owner = graph.nearest_source(snap_idx)
-    reached = np.isfinite(node_dist)
-    print(
-        f"вершин с доступом к сети остановок: {reached.sum()} из {graph.n_nodes} "
-        f"({reached.sum() / graph.n_nodes:.1%})"
-    )
-
+    # без него «время до остановки» меряется до края гексагона и вырождается в ноль.
+    # Считаем дважды: по всем физическим остановкам и только по обслуживаемым —
+    # остановка с route_count = 0 существует, но доступа к транспорту не даёт.
     node_cells = [
         h3.latlng_to_cell(float(la), float(lo), H3_RESOLUTION) for la, lo in zip(lat, lon)
     ]
     stop_ids = stops["stop_id"].to_numpy()
-    access = (
-        pl.DataFrame(
-            {
-                "h3_id": node_cells,
-                "walk_m": node_dist,
-                "nearest_stop_id": np.where(
-                    node_owner >= 0, stop_ids[np.clip(node_owner, 0, None)], None
-                ),
-            }
+    served_mask = (stops["n_routes"].to_numpy() > 0)
+    print(f"обслуживаемых остановок (route_count > 0): {served_mask.sum()} из {stops.height}")
+
+    access = None
+    for label, mask in (("all", np.ones(stops.height, dtype=bool)), ("served", served_mask)):
+        sources = snap_idx[mask]
+        subset_ids = stop_ids[mask]
+        node_dist, node_owner = graph.nearest_source(sources)
+        reached = np.isfinite(node_dist)
+        print(
+            f"[{label}] вершин с доступом: {reached.sum()} из {graph.n_nodes} "
+            f"({reached.sum() / graph.n_nodes:.1%})"
         )
-        .filter(pl.col("walk_m").is_finite())
-        .group_by("h3_id")
-        .agg(
-            pl.col("walk_m").median().alias("walk_m_median"),
-            pl.col("walk_m").min().alias("walk_m_min"),
-            pl.col("nearest_stop_id").sort_by("walk_m").first().alias("nearest_stop_id"),
-            pl.len().alias("n_nodes"),
+        part = (
+            pl.DataFrame(
+                {
+                    "h3_id": node_cells,
+                    "walk_m": node_dist,
+                    "nearest_stop_id": np.where(
+                        node_owner >= 0, subset_ids[np.clip(node_owner, 0, None)], None
+                    ),
+                }
+            )
+            .filter(pl.col("walk_m").is_finite())
+            .group_by("h3_id")
+            .agg(
+                pl.col("walk_m").median().alias(f"walk_m_{label}"),
+                pl.col("nearest_stop_id").sort_by("walk_m").first().alias(f"nearest_stop_{label}"),
+            )
         )
-    )
+        access = part if access is None else access.join(part, on="h3_id", how="full", coalesce=True)
+
     access.write_parquet(HEX_ACCESS_PARQUET)
     print(f"гексагонов с расстоянием по сети: {access.height} → {HEX_ACCESS_PARQUET}")
     print(f"время: {time.time() - t0:.1f} с")
