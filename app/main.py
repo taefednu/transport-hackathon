@@ -5,9 +5,10 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import polars as pl
+import shapely
 from fastapi import FastAPI, HTTPException, Query
 
-from app import config, coverage
+from app import config, coverage, schedule, validation
 from app.store import Store, load
 
 STATE: dict[str, Store] = {}
@@ -84,6 +85,141 @@ def stops() -> dict:
         for row in st.stops.iter_rows(named=True)
     ]
     return {"type": "FeatureCollection", "features": features}
+
+
+@app.get("/api/routes")
+def routes() -> dict:
+    st = store()
+    if st.routes is None:
+        raise HTTPException(503, "нет data/build/routes.parquet (шаг 4 пайплайна)")
+    grouped = (
+        st.routes.group_by("route_num")
+        .agg(
+            pl.col("direction").alias("directions"),
+            pl.col("name").first(),
+            pl.col("planned_headway_min").first(),
+            pl.col("length_km").max(),
+            pl.col("n_stops").max(),
+            pl.col("quality").min(),  # exact < approximate по алфавиту
+            pl.col("in_egov").first(),
+        )
+        .sort("route_num")
+    )
+    return {"count": grouped.height, "routes": grouped.to_dicts()}
+
+
+@app.get("/api/routes/{route_num}")
+def route_detail(
+    route_num: str,
+    direction: str = Query(default="fwd"),
+    weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
+) -> dict:
+    st = store()
+    if st.routes is None:
+        raise HTTPException(503, "нет data/build/routes.parquet (шаг 4 пайплайна)")
+
+    row = st.routes.filter(
+        (pl.col("route_num") == route_num) & (pl.col("direction") == direction)
+    )
+    if row.is_empty():
+        raise HTTPException(404, f"маршрут {route_num} направление {direction} не найден")
+    route = row.to_dicts()[0]
+
+    stops_seq = []
+    if st.route_stops is not None:
+        joined = (
+            st.route_stops.filter(
+                (pl.col("route_num") == route_num) & (pl.col("direction") == direction)
+            )
+            .sort("seq")
+            .join(st.stops.select("stop_id", "name", "lat", "lon", "kind"), on="stop_id", how="left")
+        )
+        stops_seq = joined.select("seq", "stop_id", "name", "lat", "lon", "kind").to_dicts()
+
+    segment_times = []
+    if st.segment_time is not None:
+        segment_times = (
+            st.segment_time.filter(
+                (pl.col("route_num") == route_num)
+                & (pl.col("direction") == direction)
+                & (pl.col("weekday_type") == weekday)
+            )
+            .sort(["seq_from", "hour"])
+            .select("seq_from", "seq_to", "hour", "travel_sec", "length_m", "traffic_share", "source")
+            .to_dicts()
+        )
+
+    geometry = None
+    if route.get("geometry_wkt"):
+        line = shapely.from_wkt(route["geometry_wkt"])
+        geometry = {"type": "LineString", "coordinates": [list(c) for c in line.coords]}
+
+    warnings = validation.route_warnings(st, route_num, direction, weekday)
+
+    return {
+        "route_num": route_num,
+        "direction": direction,
+        "weekday": weekday,
+        "name": route["name"],
+        "quality": route["quality"],
+        "planned_headway_min": route["planned_headway_min"],
+        "length_km": route["length_km"],
+        "work_start": route.get(f"work_start_{weekday}"),
+        "work_end": route.get(f"work_end_{weekday}"),
+        "geometry": geometry,
+        "stops": stops_seq,
+        "segment_times": segment_times,
+        "actual_headway": schedule.actual_headway_by_hour(st, route_num, weekday),
+        "warnings": warnings,
+    }
+
+
+@app.get("/api/routes/{route_num}/schedule")
+def route_schedule(
+    route_num: str,
+    direction: str = Query(default="fwd"),
+    weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
+    first_departure: str = Query(default=None),
+    headway_min: float = Query(default=None, gt=0),
+    n_vehicles: int = Query(default=None, ge=0),
+) -> dict:
+    st = store()
+    if st.routes is None:
+        raise HTTPException(503, "нет data/build/routes.parquet (шаг 4 пайплайна)")
+
+    row = st.routes.filter(
+        (pl.col("route_num") == route_num) & (pl.col("direction") == direction)
+    )
+    if row.is_empty():
+        raise HTTPException(404, f"маршрут {route_num} направление {direction} не найден")
+    route = row.to_dicts()[0]
+
+    # чего не задали — берём из реестра, а не из головы
+    start = first_departure or route.get(f"work_start_{weekday}")
+    if not start:
+        raise HTTPException(
+            422, f"для маршрута {route_num} нет времени начала работы в реестре, задайте first_departure"
+        )
+    headway = headway_min or route.get("planned_headway_min")
+    if not headway:
+        raise HTTPException(
+            422, f"для маршрута {route_num} нет интервала в реестре, задайте headway_min"
+        )
+
+    result = schedule.build(
+        st,
+        route_num,
+        direction,
+        weekday,
+        start,
+        float(headway),
+        n_vehicles,
+        route.get(f"work_end_{weekday}"),
+    )
+    warnings = validation.route_warnings(st, route_num, direction, weekday)
+    warnings.extend(validation.schedule_warnings(result, route, weekday))
+    return {**result, "route_num": route_num, "direction": direction, "weekday": weekday,
+            "warnings": warnings}
 
 
 @app.get("/api/baseline")
