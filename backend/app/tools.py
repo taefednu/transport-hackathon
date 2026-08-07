@@ -439,8 +439,11 @@ def route_options(store: Store, index: list, params: dict) -> dict:
     # пересказывает поля, а не заключение: на пустом списке вариантов она
     # написала «можно рассмотреть возможность продления», то есть ровно
     # обратное. Числа при этом настоящие, и охрана чисел такое не видит.
+    shown = options[: config.ASSISTANT_OPTIONS_LIMIT]
     if options:
-        verdict = f"вариантов продления найдено: {len(options)}"
+        # считаем показанные, а не все найденные: в ответ уходит срез, и число
+        # из заключения обязано совпадать с длиной списка, который читает человек
+        verdict = f"вариантов продления показано: {len(shown)}"
     else:
         parts = [
             f"продлить маршрут {route_num} некуда: остановок без обслуживания "
@@ -464,7 +467,7 @@ def route_options(store: Store, index: list, params: dict) -> dict:
         "hour_label": f"{hour}:00",
         # заключение, которое обязано прозвучать в ответе как есть
         "verdict": verdict,
-        "options": options[: config.ASSISTANT_OPTIONS_LIMIT],
+        "options": shown,
         "options_found": len(options),
         "candidates_checked": len(candidates),
         # из них способных добавить хоть кого-то: остальные стоят в кварталах,

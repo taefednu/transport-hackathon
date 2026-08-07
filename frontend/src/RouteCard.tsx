@@ -192,6 +192,10 @@ export function RouteCard({
           />
         ) : (
           <NoOptions
+            // причину собирает движок: она у каждого маршрута своя — насколько
+            // далеко ближайшая полезная остановка и какой хвост здесь допустим.
+            // Общий текст «вариантов нет» одинаков везде и читается как поломка
+            reason={options.data.verdict}
             checked={options.data.candidates_checked}
             offHousing={options.data.candidates_off_housing}
             radiusM={options.data.housing_radius_m}

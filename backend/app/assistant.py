@@ -373,7 +373,7 @@ def _render_data_summary(result: dict) -> str:
     ]
     if result["routes_with_defective_source_data"]:
         parts.append(
-            f"Помечено маршрутов с невозможными исходными значениями: "
+            f"Маршрутов с дефектными исходными данными: "
             f"{fmt(result['routes_with_defective_source_data'])} "
             f"({', '.join(result['routes_with_defective_source_data_numbers'])}) — они открываются, "
             f"но изъяты из ранжирования и подбора."

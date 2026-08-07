@@ -1,11 +1,78 @@
-.env
+# --- ДАННЫЕ: НЕ КОММИТИТЬ НИКОГДА ---
+# Датасет выдан только для трека 3 хакатона. Публикация запрещена условиями использования.
+# data/raw — симлинк на выданный датасет, data/processed — производные от него.
 data/
-*.parquet
-*.pkl
 *.csv
+*.xlsx
 *.pbf
-*.gpkg
+*.shp
+*.dbf
+*.shx
+*.prj
+*.cpg
+*.geojson
+*.parquet
+*.tif
+*.tiff
+
+# Секреты
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Node
 node_modules/
 dist/
-__pycache__/
-.venv/
+.vite/
+*.log
+
+# OS / редакторы
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# Локальные настройки Claude (не общие для команды)
+.claude/settings.local.json
+
+# Временное
+scratchpad/
+tmp/
+
+# --- Артефакты пайплайна: лежат в приватном репозитории ---
+# Сервер без них не поднимается вовсе, поэтому здесь они есть — перечислены
+# поимённо, ровно те, что читает app/store.py. Всё остальное из data/ (выданный
+# датасет, дамп OSM, слой населения, промежуточные шаги) остаётся закрытым.
+# В публичную копию они не уезжают: её собирает publish_public.sh.
+!backend/data/
+backend/data/*
+!backend/data/build/
+backend/data/build/*
+!backend/data/build/stops.parquet
+!backend/data/build/stop_hexes.parquet
+!backend/data/build/hex_access.parquet
+!backend/data/build/hexes.parquet
+!backend/data/build/hexes_buildings.parquet
+!backend/data/build/routes.parquet
+!backend/data/build/route_stops.parquet
+!backend/data/build/segment_time.parquet
+!backend/data/build/city_speed_fallback.parquet
+!backend/data/build/headway_actual.parquet
+!backend/data/build/holes.parquet
+!backend/data/build/segment_routes.parquet
+!backend/data/build/buildings.parquet
+!backend/data/build/walk_graph.pkl
+!backend/data/build/tashkent_boundary.geojson
+
+# собранный фронтенд для локальной раздачи: артефакт сборки, не исходник
+backend/static/

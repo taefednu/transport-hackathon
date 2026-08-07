@@ -357,9 +357,17 @@ export interface ExtensionOption {
 
 export interface RouteOptions {
   route_num: string
+  /** Заключение движка. Когда вариантов нет — объясняет, почему именно здесь. */
+  verdict: string
   options: ExtensionOption[]
   options_found: number
   candidates_checked: number
+  /** Из проверенных — сколько вообще способны кого-то добавить. */
+  candidates_that_can_add_people: number
+  /** До ближайшей такой остановки от конечной этого маршрута, км. */
+  nearest_useful_stop_km: number | null
+  /** Насколько длинным может быть хвост продления у этого маршрута, км. */
+  max_tail_km: number | null
   candidates_off_housing: number
   housing_radius_m: number
   min_housing_buildings: number
