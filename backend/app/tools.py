@@ -374,7 +374,17 @@ def route_options(store: Store, index: list, params: dict) -> dict:
     candidate_xy = np.array([store.stop_xy[stop_index[s]] for s in candidates])
     potential = _candidate_potential(store)
 
+    # Сколько кандидатов вообще способны кого-то добавить. Замер 08.08: из 420
+    # необслуживаемых остановок таких 10 — остальные стоят в кварталах, которые
+    # уже кто-то обслуживает. Без этого числа ответ «вариантов нет» выглядит
+    # как поломка подбора, хотя это свойство плотной сети.
+    useful = {s for s in candidates if potential.get(s, 0.0) > 0}
+
     options, skipped = [], []
+    # ближайшая полезная остановка и допустимый хвост — по этому маршруту, а не
+    # вообще: именно они объясняют, почему здесь дотянуться не до чего
+    nearest_useful_km: float | None = None
+    max_tail_km: float | None = None
     for direction in _directions(store, route_num, params.get("direction")):
         try:
             sequence = scenario_mod._route_sequence(store, route_num, direction)
@@ -396,6 +406,12 @@ def route_options(store: Store, index: list, params: dict) -> dict:
         # оставшихся: перебирать ближайших бессмысленно, они стоят в кварталах,
         # которые уже кто-то обслуживает
         limit_km = config.IMPROVEMENT_MAX_LENGTH_SHARE * float(length_km)
+        max_tail_km = limit_km if max_tail_km is None else max(max_tail_km, limit_km)
+        for position, stop_id in enumerate(candidates):
+            if stop_id in useful and (
+                nearest_useful_km is None or distances[position] < nearest_useful_km
+            ):
+                nearest_useful_km = float(distances[position])
         reachable = [i for i in range(len(candidates)) if distances[i] <= limit_km]
         reachable.sort(key=lambda i: -potential.get(candidates[i], 0.0))
         baseline = _chain_baseline(store, route_num, direction, sequence)
@@ -418,14 +434,46 @@ def route_options(store: Store, index: list, params: dict) -> dict:
                 options.append(option)
 
     options.sort(key=lambda o: (-o["gained_people"], o["extra_vehicles"]))
+
+    # Вывод собирается кодом и уходит отдельным полем. Без него модель
+    # пересказывает поля, а не заключение: на пустом списке вариантов она
+    # написала «можно рассмотреть возможность продления», то есть ровно
+    # обратное. Числа при этом настоящие, и охрана чисел такое не видит.
+    if options:
+        verdict = f"вариантов продления найдено: {len(options)}"
+    else:
+        parts = [
+            f"продлить маршрут {route_num} некуда: остановок без обслуживания "
+            f"в городе {len(candidates)}, но добавить людей способны только "
+            f"{len(useful)} — остальные стоят в кварталах, которые уже кто-то "
+            f"обслуживает"
+        ]
+        if nearest_useful_km is not None and max_tail_km is not None:
+            parts.append(
+                f"ближайшая полезная в {nearest_useful_km:.1f} км от конечной, "
+                f"а продление длиннее {max_tail_km:.1f} км — это уже другой "
+                f"маршрут, а не дотягивание"
+            )
+        parts.append("дотягиванием здесь ничего не выиграть, нужен новый маршрут")
+        verdict = "; ".join(parts)
+
     return {
         "route_num": route_num,
         "weekday": weekday,
         "hour": hour,
         "hour_label": f"{hour}:00",
+        # заключение, которое обязано прозвучать в ответе как есть
+        "verdict": verdict,
         "options": options[: config.ASSISTANT_OPTIONS_LIMIT],
         "options_found": len(options),
         "candidates_checked": len(candidates),
+        # из них способных добавить хоть кого-то: остальные стоят в кварталах,
+        # которые уже обслуживаются, и продление к ним не меняет покрытия
+        "candidates_that_can_add_people": len(useful),
+        "nearest_useful_stop_km": (
+            None if nearest_useful_km is None else round(nearest_useful_km, 1)
+        ),
+        "max_tail_km": None if max_tail_km is None else round(max_tail_km, 1),
         "candidates_off_housing": len(off_housing),
         "housing_radius_m": int(config.HOUSING_RADIUS_M),
         "min_housing_buildings": config.MIN_HOUSING_BUILDINGS,

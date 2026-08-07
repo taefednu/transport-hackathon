@@ -274,12 +274,10 @@ def _render_profile(result: dict) -> str:
 
 def _render_options(result: dict) -> str:
     if not result["options"]:
-        return (
-            f"Для маршрута {result['route_num']} вариантов продления не нашлось: "
-            f"проверено остановок без обслуживания — {fmt(result['candidates_checked'])}, "
-            f"ни одна не даёт прибавки в пределах {fmt(result['max_extra_vehicles'])} "
-            "дополнительных машин."
-        )
+        # заключение уже собрано движком: «вариантов нет» без причины читается
+        # как поломка подбора, а причина измерима и у каждого маршрута своя
+        verdict = result["verdict"]
+        return verdict[:1].upper() + verdict[1:] + "."
     lines = [f"Что можно сделать с маршрутом {result['route_num']}:"]
     for option in result["options"]:
         cost = (
