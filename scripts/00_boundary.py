@@ -15,6 +15,7 @@ import shapely
 from shapely.geometry import mapping
 
 from app.config import BOUNDARY_GEOJSON, CITY_ADMIN_LEVEL, CITY_NAMES, DATA_BUILD, OSM_PBF
+from app.config import WGS84
 
 
 def main() -> None:
@@ -77,8 +78,8 @@ def main() -> None:
 
     minx, miny, maxx, maxy = geom.bounds
     area_km2 = (
-        gpd.GeoSeries([geom], crs="EPSG:4326")
-        .to_crs(gpd.GeoSeries([geom], crs="EPSG:4326").estimate_utm_crs())
+        gpd.GeoSeries([geom], crs=WGS84)
+        .to_crs(gpd.GeoSeries([geom], crs=WGS84).estimate_utm_crs())
         .area.iloc[0]
         / 1e6
     )

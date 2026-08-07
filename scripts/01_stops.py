@@ -25,6 +25,7 @@ from app.config import (
     STOP_DEDUP_M,
     STOPS_PARQUET,
 )
+from app.config import WGS84
 from app.textnorm import normalize
 
 # теги OSM, которыми размечены остановки наземного транспорта
@@ -90,7 +91,7 @@ def osm_stops(boundary: shapely.geometry.base.BaseGeometry) -> pl.DataFrame:
     df = pl.DataFrame(rows)
     if df.is_empty():
         return df
-    pts = gpd.GeoSeries(gpd.points_from_xy(df["lon"], df["lat"]), crs="EPSG:4326")
+    pts = gpd.GeoSeries(gpd.points_from_xy(df["lon"], df["lat"]), crs=WGS84)
     inside = pts.within(boundary).to_numpy()
     return df.filter(pl.Series(inside))
 
@@ -109,14 +110,14 @@ def dedup(base: pl.DataFrame, extra: pl.DataFrame, metric_crs) -> pl.DataFrame:
 
 def to_metric(df: pl.DataFrame, metric_crs) -> np.ndarray:
     pts = gpd.GeoSeries(
-        gpd.points_from_xy(df["lon"], df["lat"]), crs="EPSG:4326"
+        gpd.points_from_xy(df["lon"], df["lat"]), crs=WGS84
     ).to_crs(metric_crs)
     return np.column_stack([pts.x.to_numpy(), pts.y.to_numpy()])
 
 
 def main() -> None:
     boundary = load_boundary()
-    metric_crs = gpd.GeoSeries([boundary], crs="EPSG:4326").estimate_utm_crs()
+    metric_crs = gpd.GeoSeries([boundary], crs=WGS84).estimate_utm_crs()
 
     ya = yandex_stops()
     print(f"Яндекс: {ya.height}")

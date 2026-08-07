@@ -41,8 +41,11 @@ from app.config import (
     TRAFFIC_MATCH_M,
     TRAFFIC_SOURCE_SHARE,
 )
+from app.config import WGS84
 
 HOURS = tuple(range(24))
+# перевод км/ч в м/с
+KMH_TO_M_PER_SEC = 1000.0 / 3600.0
 
 
 def chunk_midpoints(line, step: float):
@@ -61,7 +64,7 @@ def chunk_midpoints(line, step: float):
 def main() -> None:
     t0 = time.time()
     boundary = gpd.read_file(BOUNDARY_GEOJSON).geometry.iloc[0]
-    metric_crs = gpd.GeoSeries([boundary], crs="EPSG:4326").estimate_utm_crs()
+    metric_crs = gpd.GeoSeries([boundary], crs=WGS84).estimate_utm_crs()
 
     routes = pl.read_parquet(ROUTES_PARQUET).filter(pl.col("quality") == "exact")
     route_stops = pl.read_parquet(ROUTE_STOPS_PARQUET)
@@ -90,12 +93,12 @@ def main() -> None:
         raise SystemExit("в медиане по городу есть пустые часы — считать нечем")
 
     point_xy = gpd.GeoSeries(
-        gpd.points_from_xy(points["lon"], points["lat"]), crs="EPSG:4326"
+        gpd.points_from_xy(points["lon"], points["lat"]), crs=WGS84
     ).to_crs(metric_crs)
     point_tree = cKDTree(np.column_stack([point_xy.x.to_numpy(), point_xy.y.to_numpy()]))
 
     stop_xy = gpd.GeoSeries(
-        gpd.points_from_xy(stops["lon"], stops["lat"]), crs="EPSG:4326"
+        gpd.points_from_xy(stops["lon"], stops["lat"]), crs=WGS84
     ).to_crs(metric_crs)
     stop_pos = {
         sid: (float(x), float(y))
@@ -116,7 +119,7 @@ def main() -> None:
             continue
 
         line = (
-            gpd.GeoSeries([shapely.from_wkt(route["geometry_wkt"])], crs="EPSG:4326")
+            gpd.GeoSeries([shapely.from_wkt(route["geometry_wkt"])], crs=WGS84)
             .to_crs(metric_crs)
             .iloc[0]
         )
@@ -162,7 +165,7 @@ def main() -> None:
                     speed = np.where(matched, speed_grid[idx, w, hour], np.nan)
                     have = ~np.isnan(speed)
                     speed = np.where(have, speed, fallback_grid[w, hour])
-                    travel_sec = float(np.sum(lengths / (speed * 1000.0 / 3600.0))) + DWELL_SEC
+                    travel_sec = float(np.sum(lengths / (speed * KMH_TO_M_PER_SEC))) + DWELL_SEC
                     share = float(lengths[have].sum() / seg_len) if seg_len else 0.0
                     rows.append(
                         {

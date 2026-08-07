@@ -15,6 +15,11 @@ import h3
 import polars as pl
 
 from app.config import BOUNDARY_GEOJSON, H3_RESOLUTION, HEXES_PARQUET, KONTUR_GPKG
+from app.config import WGS84
+
+
+# сколько строк хватает, чтобы убедиться, что файл в ожидаемом разрешении
+RESOLUTION_CHECK_SAMPLE = 1000
 
 
 def main() -> None:
@@ -23,19 +28,19 @@ def main() -> None:
     kontur = gpd.read_file(KONTUR_GPKG, engine="pyogrio", columns=["h3", "population"])
     print(f"Kontur по Узбекистану: {len(kontur)} гексагонов")
 
-    resolutions = {h3.get_resolution(c) for c in kontur["h3"].head(1000)}
+    resolutions = {h3.get_resolution(c) for c in kontur["h3"].head(RESOLUTION_CHECK_SAMPLE)}
     if resolutions != {H3_RESOLUTION}:
         raise SystemExit(f"ожидалось разрешение {H3_RESOLUTION}, в файле {resolutions}")
 
     # гексагон, наполовину лежащий за городской чертой, приносит половину своих
     # жителей: иначе на границе либо теряем людей, либо забираем население области
-    kontur = kontur.to_crs("EPSG:4326")
+    kontur = kontur.to_crs(WGS84)
     touching = kontur[kontur.intersects(boundary)].copy()
     print(f"пересекают границу: {len(touching)} гексагонов")
 
-    metric_crs = gpd.GeoSeries([boundary], crs="EPSG:4326").estimate_utm_crs()
+    metric_crs = gpd.GeoSeries([boundary], crs=WGS84).estimate_utm_crs()
     geom_m = touching.geometry.to_crs(metric_crs)
-    boundary_m = gpd.GeoSeries([boundary], crs="EPSG:4326").to_crs(metric_crs).iloc[0]
+    boundary_m = gpd.GeoSeries([boundary], crs=WGS84).to_crs(metric_crs).iloc[0]
     share = (geom_m.intersection(boundary_m).area / geom_m.area).clip(0.0, 1.0)
 
     centroids = [h3.cell_to_latlng(c) for c in touching["h3"]]

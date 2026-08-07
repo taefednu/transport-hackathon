@@ -33,6 +33,7 @@ from app.config import (
     WALK_HIGHWAY_TYPES,
     WALK_LIMIT_M,
 )
+from app.config import WGS84
 from app.walkgraph import WalkGraph
 
 
@@ -70,7 +71,7 @@ class WayCollector(osmium.SimpleHandler):
 def main() -> None:
     t0 = time.time()
     boundary = gpd.read_file(BOUNDARY_GEOJSON).geometry.iloc[0]
-    metric_crs = gpd.GeoSeries([boundary], crs="EPSG:4326").estimate_utm_crs()
+    metric_crs = gpd.GeoSeries([boundary], crs=WGS84).estimate_utm_crs()
 
     handler = WayCollector(boundary.bounds)
     handler.apply_file(str(OSM_PBF), locations=True, idx="flex_mem")
@@ -81,7 +82,7 @@ def main() -> None:
     lat = np.array([handler.coords[n][0] for n in node_ids])
     lon = np.array([handler.coords[n][1] for n in node_ids])
 
-    transformer = Transformer.from_crs("EPSG:4326", metric_crs, always_xy=True)
+    transformer = Transformer.from_crs(WGS84, metric_crs, always_xy=True)
     x, y = transformer.transform(lon, lat)
     x, y = np.asarray(x), np.asarray(y)
 

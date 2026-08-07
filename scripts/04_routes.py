@@ -35,6 +35,7 @@ from app.config import (
     STOP_DEDUP_M,
     STOPS_PARQUET,
 )
+from app.config import WGS84
 
 # роли членов релейшена, которыми размечены точки посадки
 STOP_ROLES = frozenset(
@@ -180,7 +181,7 @@ def _close(a, b, eps: float = 1e-7) -> bool:
 def main() -> None:
     t0 = time.time()
     boundary = gpd.read_file(BOUNDARY_GEOJSON).geometry.iloc[0]
-    metric_crs = gpd.GeoSeries([boundary], crs="EPSG:4326").estimate_utm_crs()
+    metric_crs = gpd.GeoSeries([boundary], crs=WGS84).estimate_utm_crs()
     egov = read_egov()
     print(f"egov: {len(egov)} уникальных маршрутов")
 
@@ -194,14 +195,14 @@ def main() -> None:
 
     stops = pl.read_parquet(STOPS_PARQUET)
     stop_pts = gpd.GeoSeries(
-        gpd.points_from_xy(stops["lon"], stops["lat"]), crs="EPSG:4326"
+        gpd.points_from_xy(stops["lon"], stops["lat"]), crs=WGS84
     ).to_crs(metric_crs)
     stop_tree = cKDTree(np.column_stack([stop_pts.x.to_numpy(), stop_pts.y.to_numpy()]))
     stop_ids = stops["stop_id"].to_numpy()
 
     from pyproj import Transformer
 
-    to_metric = Transformer.from_crs("EPSG:4326", metric_crs, always_xy=True)
+    to_metric = Transformer.from_crs(WGS84, metric_crs, always_xy=True)
 
     by_ref: dict[str, list[dict]] = {}
     for rel in relations:
@@ -247,7 +248,7 @@ def main() -> None:
             length_km = meta.get("length_km")
             if length_km is None:
                 length_km = float(
-                    gpd.GeoSeries([geom], crs="EPSG:4326").to_crs(metric_crs).length.iloc[0] / 1000
+                    gpd.GeoSeries([geom], crs=WGS84).to_crs(metric_crs).length.iloc[0] / 1000
                 )
             route_rows.append(
                 {

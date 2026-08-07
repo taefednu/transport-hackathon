@@ -12,6 +12,7 @@ import polars as pl
 from app.config import (
     DUPLICATION_ROUTE_COUNT,
     FALLBACK_SHARE_WARN,
+    MAX_DUPLICATION_WARNINGS,
     MAX_ROUTE_LENGTH_KM,
     MIN_STOP_SPACING_M,
 )
@@ -127,7 +128,7 @@ def duplication_warnings(store: Store, route_num: str, direction: str) -> list[d
             route_num=route_num,
             segment_key=row["segment_key"],
         )
-        for row in crowded.head(20).iter_rows(named=True)
+        for row in crowded.head(MAX_DUPLICATION_WARNINGS).iter_rows(named=True)
     ]
 
 
@@ -153,11 +154,11 @@ def schedule_warnings(schedule: dict, route: dict, weekday: str) -> list[dict]:
     work_end = route.get(f"work_end_{weekday}")
     last_sec = schedule.get("last_arrival_last_stop_sec")
     if work_end and last_sec is not None:
-        from app.schedule import parse_hhmm
+        from app.schedule import SECONDS_PER_DAY, parse_hhmm
 
         limit = parse_hhmm(work_end)
         if limit < parse_hhmm(schedule["first_departure"]):
-            limit += 24 * 3600
+            limit += SECONDS_PER_DAY
         if last_sec > limit:
             out.append(
                 _warn(
