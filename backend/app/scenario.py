@@ -49,10 +49,19 @@ def apply_ops(store: Store, ops: list[dict]) -> tuple[dict[tuple[str, str], list
     for op in ops:
         kind = op.get("type")
         if kind == "set_schedule":
+            # ноль здесь — не «не указано». Ключ приходит всегда (модель обязана
+            # заполнять все поля схемы), а дальше по коду ноль ложным значением
+            # молча подменился бы интервалом из реестра. Лучше сказать вслух.
+            headway = op.get("headway_min")
+            if headway is not None and float(headway) <= 0:
+                raise ScenarioError("интервал должен быть больше нуля")
+            vehicles = op.get("n_vehicles")
+            if vehicles is not None and int(vehicles) < 0:
+                raise ScenarioError("число машин на линии не может быть отрицательным")
             schedules[op["route_num"]] = {
                 "first_departure": op.get("first_departure"),
-                "headway_min": op.get("headway_min"),
-                "n_vehicles": op.get("n_vehicles"),
+                "headway_min": headway,
+                "n_vehicles": vehicles,
             }
             continue
 

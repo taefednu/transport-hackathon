@@ -10,7 +10,17 @@ import polars as pl
 import shapely
 from fastapi import FastAPI, HTTPException, Query, Response
 
-from app import config, coverage, scenario, schedule, search as search_mod, validation
+from app import (
+    config,
+    coverage,
+    explain as explain_mod,
+    llm,
+    nlparse,
+    scenario,
+    schedule,
+    search as search_mod,
+    validation,
+)
 from app.store import Store, load
 
 STATE: dict[str, Store] = {}
@@ -246,6 +256,33 @@ def post_scenario(body: dict) -> dict:
         return scenario.run(store(), weekday, hour, ops)
     except scenario.ScenarioError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/nl/scenario")
+def nl_scenario(body: dict) -> dict:
+    """Фраза словами → объект сценария для POST /api/scenario.
+
+    Сценарий здесь не применяется: эндпоинт переводит язык в структуру,
+    считает по-прежнему движок.
+    """
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(422, "нужно поле text с фразой")
+    return nlparse.parse(store(), STATE["search_index"], text)
+
+
+@app.post("/api/explain")
+def explain(body: dict) -> dict:
+    """Результат сценария → абзац для служебной записки."""
+    if not isinstance(body, dict) or not body:
+        raise HTTPException(422, "нужно тело с результатом сценария")
+    return explain_mod.explain(store(), body)
+
+
+@app.get("/api/llm")
+def llm_status() -> dict:
+    """Каким путём пойдут оба текстовых эндпоинта прямо сейчас."""
+    return llm.status()
 
 
 @app.get("/api/holes")

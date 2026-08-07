@@ -12,6 +12,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# ключи модели лежат в .env рядом с репозиторием и в git не попадают
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env")
+except ImportError:  # без dotenv читаем только настоящее окружение
+    pass
+
 
 def _path(env_name: str, default: Path) -> Path:
     raw = os.environ.get(env_name)
@@ -103,11 +111,41 @@ CITY_NAMES = tuple(
 # --- окно данных --------------------------------------------------------
 # соответствие дат выданных транзакций дням недели (ТЗ шаг 7)
 WEEKDAY_TYPES = ("fri", "sat", "sun")
+# как день недели называется в тексте («сценарий на пятницу», «пересчёт на субботу»)
+WEEKDAY_NAMES = {"fri": "пятницу", "sat": "субботу", "sun": "воскресенье"}
 TRANSACTION_DATE_TO_WEEKDAY = {
     "2026-05-01": "fri",
     "2026-05-02": "sat",
     "2026-05-03": "sun",
 }
+
+# дата среза слоя населения: называть цифру без даты нельзя, слой отстаёт от
+# официальной статистики примерно на 18% (knowledge/facts.md §7)
+POPULATION_LAYER_DATE = "01.11.2023"
+
+# --- YandexGPT ----------------------------------------------------------
+# Yandex AI Studio, Foundation Models v1. Адрес и имена полей сверены с
+# официальными proto yandex-cloud/cloudapi (см. knowledge/decisions.md).
+# Ключи — только из окружения, в репозиторий не коммитятся.
+LLM_ENDPOINT = os.environ.get(
+    "QATNOV_YC_ENDPOINT", "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+)
+LLM_MODEL = os.environ.get("QATNOV_YC_MODEL", "yandexgpt/latest")
+LLM_API_KEY = os.environ.get("QATNOV_YC_API_KEY", "").strip()
+LLM_FOLDER_ID = os.environ.get("QATNOV_YC_FOLDER_ID", "").strip()
+# рубильник для демонстрации запасного пути и для прогона гейтов без сети
+LLM_DISABLED = os.environ.get("QATNOV_LLM_DISABLED", "").strip().lower() in {"1", "true", "yes"}
+# строгий JSON: "schema" — jsonSchema из proto, "object" — jsonObject
+LLM_JSON_MODE = os.environ.get("QATNOV_YC_JSON_MODE", "schema").strip().lower()
+# зал показа, связь ненадёжна: ждём модель ровно столько и уходим на запасной путь
+LLM_TIMEOUT_SEC = float(os.environ.get("QATNOV_LLM_TIMEOUT_SEC", "5"))
+# разбор фразы — без творчества; пересказ чисел — почти без него
+LLM_TEMPERATURE_PARSE = 0.0
+LLM_TEMPERATURE_EXPLAIN = 0.2
+LLM_MAX_TOKENS_PARSE = 400
+LLM_MAX_TOKENS_EXPLAIN = 700
+# кэш ответов на время демонстрации: одна фраза не должна стоить двух запросов
+LLM_CACHE_SIZE = 256
 
 # --- сеть -------------------------------------------------------------
 # типы дорог, по которым ходит пешеход (ТЗ шаг 2)

@@ -9,6 +9,7 @@ import _bootstrap  # noqa: F401
 import json
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -26,6 +27,20 @@ def get(path: str):
 def get_json(path: str):
     body, ms = get(path)
     return json.loads(body), ms
+
+
+def post_status(path: str, payload: dict) -> tuple[int, str]:
+    """Код и тело ответа, включая ошибочные: их-то и проверяем."""
+    request = urllib.request.Request(
+        BASE + path,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request) as response:
+            return response.status, response.read().decode()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode()
 
 
 def post_json(path: str, payload: dict):
@@ -171,6 +186,260 @@ def gate6():
     )
 
 
+def gate7(gain_stop_name: str) -> dict:
+    """Разбор фразы на естественном языке: четыре критерия из задачи."""
+    literal = post_json(
+        "/api/nl/scenario",
+        {"text": "продлить четырнадцатый до Куйлюка и посмотреть, что будет в утренний пик"},
+    )[0]
+    # объект сценария принимается движком без единой правки
+    accepted = literal["scenario"] is not None
+    if accepted:
+        post_json("/api/scenario", literal["scenario"])
+
+    # прирост людей проверяем на остановке, у которой он вообще может быть:
+    # Куйлюк уже обслуживают шесть маршрутов, продление туда даёт ноль (см. detail)
+    gain_parse = post_json("/api/nl/scenario", {"text": f"продлить четырнадцатый до {gain_stop_name}"})[0]
+    gain_result = post_json("/api/scenario", gain_parse["scenario"])[0] if gain_parse["scenario"] else {}
+    gained = gain_result.get("gained", 0)
+
+    latin = post_json("/api/nl/scenario", {"text": "продлить маршрут 14 до Massiv Qo'yliq-1"})[0]
+    same_stop = (
+        accepted
+        and latin["scenario"] is not None
+        and latin["scenario"]["ops"][0]["stops"] == literal["scenario"]["ops"][0]["stops"]
+    )
+
+    missing = post_json(
+        "/api/nl/scenario", {"text": "продлить четырнадцатый до Марсианской набережной"}
+    )[0]
+    missing_ok = missing["scenario"] is None and bool(missing["unresolved"])
+
+    ambiguous, ms = post_json("/api/nl/scenario", {"text": "продлить четырнадцатый до Qo'yliq"})
+    ambiguous_ok = (
+        ambiguous["scenario"] is None
+        and bool(ambiguous["ambiguous"])
+        and len(ambiguous["ambiguous"][0]["candidates"]) >= 2
+    )
+
+    check(
+        "Гейт 7 — фраза словами превращается в сценарий",
+        accepted and gained > 0 and same_stop and missing_ok and ambiguous_ok,
+        f"«до Куйлюка» → {literal['understood']} (путь: {literal['source']}), "
+        f"движок принял объект: {accepted}, прирост по Куйлюку 0 — остановку уже обслуживают; "
+        f"«до {gain_stop_name}» → +{gained:,.0f} чел.; латиница с апострофом даёт ту же остановку: "
+        f"{same_stop}; несуществующая остановка: {missing['unresolved'][0]['reason'] if missing['unresolved'] else '—'}; "
+        f"неоднозначное название → {len(ambiguous['ambiguous'][0]['candidates']) if ambiguous['ambiguous'] else 0} кандидата; {ms:.0f} мс",
+    )
+    return {"gain_parse": gain_parse, "gain_result": gain_result, "literal": literal}
+
+
+def gate8(gain_result: dict) -> dict:
+    """Объяснение результата: ни одного числа сверх входных данных."""
+    from app import explain as explain_mod
+
+    payload = {
+        "result": gain_result,
+        "sources": {"fallback_share": 0.089, "population_layer_date": "01.11.2023"},
+    }
+    answer, ms = post_json("/api/explain", payload)
+    extra = sorted(explain_mod.numbers_in(answer["text"]) - explain_mod.allowed_numbers(answer["facts"]))
+    missing = explain_mod.missing_disclaimer(answer["text"], answer["facts"])
+    check(
+        "Гейт 8 — объяснение не выдумывает чисел и не теряет оговорку",
+        not extra and not missing and bool(answer["text"]),
+        f"путь: {answer['source']}"
+        + (f" ({answer['reason']})" if answer.get("reason") else "")
+        + f"; чисел вне входных данных: {len(extra)}"
+        + (f" {extra}" if extra else "")
+        + f"; в оговорке не хватает: {missing or 'ничего'}"
+        + f"; длина {len(answer['text'])} знаков; {ms:.0f} мс",
+    )
+    return answer
+
+
+def gate9(store, gain_stop_name: str) -> dict:
+    """Оба эндпоинта при выключенной модели: путь помечен детерминированным."""
+    import importlib
+    import os
+
+    from app import config, explain as explain_mod, llm, nlparse
+    from app import search as search_mod
+
+    previous = os.environ.get("QATNOV_LLM_DISABLED")
+    os.environ["QATNOV_LLM_DISABLED"] = "1"
+    importlib.reload(config)
+    try:
+        index = search_mod.build_index(store)
+        parsed = nlparse.parse(store, index, f"продлить четырнадцатый до {gain_stop_name}")
+        from app import scenario as scenario_mod
+
+        result = scenario_mod.run(
+            store, parsed["scenario"]["weekday"], parsed["scenario"]["hour"], parsed["scenario"]["ops"]
+        )
+        text = explain_mod.explain(store, {"result": result})
+        offline_ok = (
+            not llm.available()
+            and parsed["source"] == "deterministic"
+            and parsed["scenario"] is not None
+            and text["source"] == "deterministic"
+            and bool(text["text"])
+        )
+        extra = sorted(
+            explain_mod.numbers_in(text["text"]) - explain_mod.allowed_numbers(text["facts"])
+        )
+        check(
+            "Гейт 9 — оба эндпоинта работают без модели",
+            offline_ok and not extra,
+            f"разбор: {parsed['source']}, сценарий собран: {parsed['scenario'] is not None}; "
+            f"объяснение: {text['source']} ({text['reason']}); чисел вне входных данных: {len(extra)}",
+        )
+        return {"parsed": parsed, "explained": text}
+    finally:
+        if previous is None:
+            os.environ.pop("QATNOV_LLM_DISABLED", None)
+        else:
+            os.environ["QATNOV_LLM_DISABLED"] = previous
+        importlib.reload(config)
+
+
+def gate10(store, gain_stop_name: str) -> None:
+    """Модельный путь на подставном ответе сети.
+
+    Живого ключа Yandex Cloud нет, поэтому подменяется ровно один слой —
+    `urlopen`. Всё, что проверяется (сборка тела запроса, разбор ответа,
+    приведение намерения, резолв по базе, охрана чисел), выполняется настоящее.
+    """
+    import importlib
+    import json as json_mod
+    import os
+    import urllib.request
+
+    from app import config, explain as explain_mod, llm, nlparse, scenario as scenario_mod
+    from app import search as search_mod
+
+    saved = {k: os.environ.get(k) for k in ("QATNOV_YC_API_KEY", "QATNOV_YC_FOLDER_ID", "QATNOV_LLM_DISABLED")}
+    os.environ["QATNOV_YC_API_KEY"] = "test-key"
+    os.environ["QATNOV_YC_FOLDER_ID"] = "test-folder"
+    os.environ.pop("QATNOV_LLM_DISABLED", None)
+    importlib.reload(config)
+    real_urlopen = urllib.request.urlopen
+
+    state = {"paragraph": ""}
+
+    class FakeResponse:
+        def __init__(self, payload: dict):
+            self._body = json_mod.dumps(payload, ensure_ascii=False).encode()
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        sent = json_mod.loads(request.data.decode())
+        is_parse = "jsonSchema" in sent or "jsonObject" in sent
+        text = (
+            json_mod.dumps(
+                {
+                    "op": "extend_route",
+                    "route": "четырнадцатый",
+                    "stops": [gain_stop_name],
+                    "anchor_stop": "",
+                    "hour": 8,
+                    "weekday": "fri",
+                    "headway_min": 0,
+                    "first_departure": "",
+                    "n_vehicles": 0,
+                },
+                ensure_ascii=False,
+            )
+            if is_parse
+            else state["paragraph"]
+        )
+        return FakeResponse(
+            {
+                "result": {
+                    "alternatives": [
+                        {"message": {"role": "assistant", "text": text}, "status": "ALTERNATIVE_STATUS_FINAL"}
+                    ],
+                    "usage": {"inputTextTokens": 1, "completionTokens": 1, "totalTokens": 2},
+                    "modelVersion": "fake",
+                }
+            }
+        )
+
+    urllib.request.urlopen = fake_urlopen
+    try:
+        index = search_mod.build_index(store)
+        parsed = nlparse.parse(store, index, "продлить четырнадцатый до какой-нибудь остановки")
+        parse_ok = parsed["source"] in ("model", "cache") and parsed["scenario"] is not None
+
+        result = scenario_mod.run(
+            store, parsed["scenario"]["weekday"], parsed["scenario"]["hour"], parsed["scenario"]["ops"]
+        )
+        facts = explain_mod.build_facts(store, {"result": result})
+
+        state["paragraph"] = (
+            f"Доступ получают {facts['получили_доступ_человек']} человек, теряют "
+            f"{facts['потеряли_доступ_человек']}. Источники: "
+            f"{facts['оговорка']['доля_перегонов_по_медиане_города_процент']}% перегонов "
+            f"по медиане скорости города, слой населения — срез "
+            f"{facts['оговорка']['дата_слоя_населения']}."
+        )
+        clean = explain_mod.explain(store, {"result": result})
+
+        # тело запроса то же самое, поэтому без сброса кэша второй ответ не дойдёт
+        llm.clear_cache()
+        state["paragraph"] = "Доступ получают 999999 человек, это примерно 42 процента города."
+        dirty = explain_mod.explain(store, {"result": result})
+
+        check(
+            "Гейт 10 — модельный путь и охрана чисел (ответ сети подставной)",
+            parse_ok and clean["source"] in ("model", "cache") and dirty["source"] == "deterministic",
+            f"разбор через модель: {parsed['source']}, остановка «{gain_stop_name}» опознана: "
+            f"{parsed['scenario'] is not None}; чистый абзац принят как {clean['source']}; "
+            f"абзац с выдуманным числом отклонён: {dirty['reason']}",
+        )
+    finally:
+        urllib.request.urlopen = real_urlopen
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        importlib.reload(config)
+
+
+def gate11() -> None:
+    """Ноль не уезжает в расчёт ни из разбора фразы, ни напрямую в движок.
+
+    Схема Яндекса требует все поля, поэтому `headway_min: 0` приходит от модели
+    всегда — и не должен ни попасть в операции, ни быть молча понят как «оставить
+    интервал из реестра».
+    """
+    parsed = post_json("/api/nl/scenario", {"text": "поставить на восьмёрке выезд в 05:40"})[0]
+    op = (parsed["scenario"] or {}).get("ops", [{}])[0]
+    clean = "headway_min" not in op and "n_vehicles" not in op
+
+    code, body = post_status(
+        "/api/scenario",
+        {"weekday": "fri", "hour": 8, "ops": [{"type": "set_schedule", "route_num": "8", "headway_min": 0}]},
+    )
+    rejected = code == 422 and "больше нуля" in body
+    check(
+        "Гейт 11 — нулевой интервал не уезжает в расчёт",
+        clean and rejected,
+        f"фраза без интервала → ops {json.dumps(op, ensure_ascii=False)}; "
+        f"прямой POST с headway_min=0 → HTTP {code}, "
+        f"{json.loads(body).get('detail') if code == 422 else 'принят молча'}",
+    )
+
+
 def main() -> None:
     import polars as pl
 
@@ -204,12 +473,36 @@ def main() -> None:
     )
     trim = store.route_stops.filter(pl.col("stop_id") == solo["only_stop"][0]).to_dicts()[0]
 
+    # остановка для фразы, у которой прирост людей вообще может быть ненулевым:
+    # первая по приросту из тех, у кого есть название, которое можно назвать словами
+    names = dict(zip(store.stops["stop_id"].to_list(), store.stops["name"].to_list()))
+    gain_stop_name = next(
+        names[s] for s, _ in sorted(gain.items(), key=lambda kv: -kv[1]) if names.get(s)
+    )
+
     gate1()
     gate2()
     gate3()
     gate4(extend_stops, trim["route_num"], trim["direction"], max(0, int(trim["seq"]) - 1))
     gate5()
     gate6()
+    nl = gate7(gain_stop_name)
+    explained = gate8(nl["gain_result"])
+    offline = gate9(store, gain_stop_name)
+    gate10(store, gain_stop_name)
+    gate11()
+
+    print()
+    print("Разобранный сценарий (фраза → объект для POST /api/scenario):")
+    print(f"  фраза: продлить четырнадцатый до {gain_stop_name}")
+    print(f"  {json.dumps(nl['gain_parse']['scenario'], ensure_ascii=False)}")
+    print(f"  подтверждение: {nl['gain_parse']['understood']}")
+    print()
+    print(f"Объяснение результата (путь: {explained['source']}):")
+    print(f"  {explained['text']}")
+    print()
+    print(f"Он же при выключенной модели (путь: {offline['explained']['source']}):")
+    print(f"  {offline['explained']['text']}")
 
     passed = sum(1 for _, ok, _ in results if ok)
     print()

@@ -77,14 +77,23 @@ def build_index(store: Store) -> list[Entry]:
     return entries
 
 
-def search(index: list[Entry], query: str, limit: int = DEFAULT_LIMIT) -> dict:
+MATCH_NAMES = ("exact", "prefix", "fuzzy")
+
+
+def rank_entries(index: list[Entry], query: str, kind: str | None = None) -> list[tuple[int, int, Entry]]:
+    """Отранжированные совпадения `(rank, score, entry)`, лучшие в начале.
+
+    Вынесено из `search`, потому что этим же ранжированием разбор фразы на
+    естественном языке отличает однозначное совпадение от неоднозначного:
+    ему нужен не список, а признак «лучший кандидат один или их несколько».
+    """
     needle = normalize(query)
     if not needle:
-        return {"query": query, "normalized": needle, "routes": [], "stops": []}
+        return []
 
-    scored = []
+    scored: list[tuple[int, int, Entry]] = []
     for entry in index:
-        if not entry.norm:
+        if not entry.norm or (kind is not None and entry.kind != kind):
             continue
         if entry.norm == needle:
             rank, score = 0, 0
@@ -98,20 +107,29 @@ def search(index: list[Entry], query: str, limit: int = DEFAULT_LIMIT) -> dict:
         scored.append((rank, score, entry))
 
     scored.sort(key=lambda item: (item[0], item[1], item[2].title))
+    return scored
+
+
+def pack_entry(entry: Entry, rank: int) -> dict:
+    return {
+        "id": entry.id,
+        "title": entry.title,
+        "detail": entry.detail,
+        "lat": entry.lat,
+        "lon": entry.lon,
+        "match": MATCH_NAMES[rank],
+    }
+
+
+def search(index: list[Entry], query: str, limit: int = DEFAULT_LIMIT) -> dict:
+    needle = normalize(query)
+    if not needle:
+        return {"query": query, "normalized": needle, "routes": [], "stops": []}
+
+    scored = rank_entries(index, query)
 
     def pack(kind: str) -> list[dict]:
-        return [
-            {
-                "id": e.id,
-                "title": e.title,
-                "detail": e.detail,
-                "lat": e.lat,
-                "lon": e.lon,
-                "match": ("exact", "prefix", "fuzzy")[rank],
-            }
-            for rank, _, e in scored
-            if e.kind == kind
-        ][:limit]
+        return [pack_entry(e, rank) for rank, _, e in scored if e.kind == kind][:limit]
 
     return {
         "query": query,
