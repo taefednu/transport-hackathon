@@ -19,12 +19,27 @@ knowledge/         база знаний, единственный источн�
   decisions.md     лог решений
   open-questions.md что не решено
   glossary.md      термины
+  lessons.md       классы ошибок, которые уже стоили времени
+qatnov_backend_tz.md  ТЗ на бэкенд
+NIGHT_REPORT.md       отчёт о сборке бэкенда: гейты, числа, что не сделано
 data/
   raw/             СИМЛИНК на выданный датасет. Read-only, не коммитится
-  processed/       производные данные. Не коммитится
-src/               код расчётов и API
-scripts/           воспроизводимые шаги подготовки данных
+  external/        открытые источники: OSM PBF, Kontur Population. Не коммитится
+  build/           артефакты пайплайна, parquet. Не коммитится
+app/               FastAPI и расчёты
+scripts/           пайплайн (00..09), run_all.sh, verify_gates.py
 ```
+
+## Запуск
+
+```bash
+.venv/bin/python -m uvicorn app.main:app --port 8024   # сервер
+.venv/bin/python scripts/verify_gates.py 8024          # приёмка всех гейтов ТЗ
+bash scripts/run_all.sh                                # пересобрать пайплайн (~5 мин)
+```
+
+Внешние источники кладутся в `data/external/`: `uzbekistan-latest.osm.pbf` (Geofabrik) и
+`kontur_population_UZ.gpkg` (HDX). Overpass API из этой сети недоступен — всё из локального дампа.
 
 ## Данные
 

@@ -32,6 +32,8 @@
 2. `knowledge/product.md` — что строим и что в MVP.
 3. `knowledge/data.md` — какие файлы есть, где ловушки, что с чем соединяется.
 4. `knowledge/open-questions.md` — что ещё не решено.
+5. `NIGHT_REPORT.md` — что уже построено и какими числами это проверено.
+6. `knowledge/lessons.md` — на чём уже спотыкались.
 
 Не исследуй `data/raw/` вслепую: разбор уже сделан, он в `data.md` и в
 `data/raw/track3_analysis.md`. Сначала читай разбор, потом файлы.
@@ -72,6 +74,7 @@
 | `knowledge/decisions.md` | лог решений (что, когда, почему). Новое — сверху | принято решение |
 | `knowledge/open-questions.md` | нерешённое; закрывается в `decisions.md` | появился/снялся вопрос |
 | `knowledge/glossary.md` | термины: OD, trip-chaining, изохрона, брутто-контракт… | ввёл новый термин |
+| `knowledge/lessons.md` | классы ошибок, которые уже стоили времени | поймал ошибку, которая может повториться |
 
 `facts.md` — первичен. Остальные ссылаются на него, а не дублируют.
 
@@ -79,7 +82,9 @@
 
 ```bash
 # Python
-.venv/bin/python -c "import ast; ast.parse(open('src/X.py').read())"   # синтаксис
+.venv/bin/python -c "import ast; ast.parse(open('app/X.py').read())"   # синтаксис
+.venv/bin/python scripts/verify_gates.py 8024                           # приёмка гейтов ТЗ
+bash scripts/run_all.sh                                                # пересборка пайплайна
 .venv/bin/python -m pytest -q                                          # тесты (если есть)
 
 # Frontend
