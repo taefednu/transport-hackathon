@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Гексагон H3 r8 — расчётная единица продукта, точка внутри — остановка.
+       Фон сплошной: вкладка бывает и светлой, и тёмной. -->
+  <rect width="32" height="32" rx="7" fill="#0F5FA6"/>
+  <path d="M16 5.5 24.5 10.75v10.5L16 26.5 7.5 21.25v-10.5z"
+        fill="none" stroke="#FFFFFF" stroke-width="2.6" stroke-linejoin="round"/>
+  <circle cx="16" cy="16" r="3.4" fill="#FFFFFF"/>
+</svg>

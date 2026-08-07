@@ -22,7 +22,10 @@ const require = createRequire(import.meta.url)
  * настройки `build.assetsDir`.
  */
 function maplibreWorkerAsset(): Plugin {
-  const NAME = 'maplibre-gl-worker.mjs'
+  const ENTRY = 'maplibre-gl-worker.mjs'
+  // воркер — не один файл: он импортирует соседей тем же способом, поэтому
+  // выложить только его — значит поменять один 404 на другой. Идём по импортам
+  const SIBLING = /from\s*["']\.\/([\w.-]+\.mjs)["']/g
   return {
     name: 'maplibre-worker-asset',
     apply: 'build',
@@ -34,11 +37,17 @@ function maplibreWorkerAsset(): Plugin {
       const dir = entry.fileName.includes('/')
         ? entry.fileName.slice(0, entry.fileName.lastIndexOf('/') + 1)
         : ''
-      this.emitFile({
-        type: 'asset',
-        fileName: `${dir}${NAME}`,
-        source: readFileSync(require.resolve(`maplibre-gl/dist/${NAME}`)),
-      })
+
+      const emitted = new Set<string>()
+      const queue = [ENTRY]
+      while (queue.length) {
+        const name = queue.pop() as string
+        if (emitted.has(name)) continue
+        emitted.add(name)
+        const source = readFileSync(require.resolve(`maplibre-gl/dist/${name}`), 'utf8')
+        this.emitFile({ type: 'asset', fileName: `${dir}${name}`, source })
+        for (const match of source.matchAll(SIBLING)) queue.push(match[1])
+      }
     },
   }
 }
