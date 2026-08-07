@@ -21,44 +21,74 @@ knowledge/         база знаний, единственный источн�
   glossary.md      термины
   lessons.md       классы ошибок, которые уже стоили времени
 qatnov_backend_tz.md  ТЗ на бэкенд
+qatnov_map_spec.md    спека карты (фронтенд)
 NIGHT_REPORT.md       отчёт о сборке бэкенда: гейты, числа, что не сделано
-data/
-  raw/             СИМЛИНК на выданный датасет. Read-only, не коммитится
-  external/        открытые источники: OSM PBF, Kontur Population. Не коммитится
-  build/           артефакты пайплайна, parquet. Не коммитится
-app/               FastAPI и расчёты
-scripts/           пайплайн (00..09), run_all.sh, verify_gates.py
+backend/           Python: FastAPI, расчёты, пайплайн данных
+  app/             FastAPI и расчёты
+  scripts/         пайплайн (00..09), run_all.sh, verify_gates.py
+  data/
+    raw/           СИМЛИНК на выданный датасет. Read-only, не коммитится
+    external/      открытые источники: OSM PBF, Kontur Population. Не коммитится
+    build/         артефакты пайплайна, parquet. Не коммитится
+  .venv/           виртуальное окружение Python. Не коммитится
+frontend/          карта и UI: Vite + TypeScript, MapLibre
+LICENSE            MIT
 ```
 
 ## Запуск
 
+Все команды бэкенда — из каталога `backend/`.
+
 ```bash
+cd backend
 .venv/bin/python -m uvicorn app.main:app --port 8024   # сервер
 .venv/bin/python scripts/verify_gates.py 8024          # приёмка всех гейтов ТЗ
 bash scripts/run_all.sh                                # пересобрать пайплайн (~5 мин)
 ```
 
-Внешние источники кладутся в `data/external/`: `uzbekistan-latest.osm.pbf` (Geofabrik) и
+Фронтенд — из каталога `frontend/`:
+
+```bash
+cd frontend
+npm install
+npm run dev          # адрес ядра задаётся в .env, по умолчанию http://localhost:8025
+```
+
+Внешние источники кладутся в `backend/data/external/`: `uzbekistan-latest.osm.pbf` (Geofabrik) и
 `kontur_population_UZ.gpkg` (HDX). Overpass API из этой сети недоступен — всё из локального дампа.
 
 ## Данные
 
-`data/raw` указывает на `/mnt/d/Transport Hackathon/track3_dataset`. Если симлинк битый
+`backend/data/raw` указывает на `/mnt/d/Transport Hackathon/track3_dataset`. Если симлинк битый
 (другая машина, другой путь) — пересоздать:
 
 ```bash
-ln -sfn "<путь до track3_dataset>" data/raw
+ln -sfn "<путь до track3_dataset>" backend/data/raw
 ```
+
+**В этом репозитории данных нет и не будет.** Открыт только код. Датасет
+организаторов, дамп OSM, слой Kontur и все артефакты пайплайна закрыты
+`.gitignore`: на чистом клоне работают импорт, тесты синтаксиса и чтение кода,
+а расчёт заводится только на своих данных по инструкции выше.
 
 Датасет выдан **только для трека 3**: не распространять вне команды, не публиковать,
 не пытаться связать `pan_hash`/`masked_pan` с людьми. `.gitignore` закрывает весь `data/`
 и все табличные/геоформаты — если понадобится закоммитить маленький выходной `.geojson`,
 добавлять только через `git add -f` и только осознанно, убедившись, что это агрегат.
 
-Разбор данных уже сделан: [`knowledge/data.md`](knowledge/data.md) и `data/raw/track3_analysis.md`.
+Разбор данных уже сделан: [`knowledge/data.md`](knowledge/data.md) и `backend/data/raw/track3_analysis.md`.
 Читать разбор до того, как открывать файлы.
 
 ## Начало сессии
 
 Claude читает `CLAUDE.md`, затем `knowledge/facts.md` → `product.md` → `data.md` →
 `open-questions.md`. Стек ещё не подтверждён — см. `decisions.md`.
+
+## Лицензия
+
+Код — [MIT](LICENSE).
+
+Лицензия распространяется **только на код этого репозитория**. Данные ей не
+покрыты и здесь не лежат: датасет организаторов выдан для трека 3 и не
+подлежит публикации, OpenStreetMap — ODbL, Kontur Population — CC BY,
+численность населения — официальная статистика Нацкомстата.

@@ -1,0 +1,1399 @@
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+@import 'maplibre-gl/dist/maplibre-gl.css';
+
+:root {
+  --bg: #f7f6f3;
+  --ink: #3d3a35;
+  --ink-soft: #6b665e;
+  --hairline: #dedbd4;
+  --card: #ffffff;
+  --selected: #0f5fa6;
+  --removed: #c2563f;
+  --warn: #e9a93c;
+  --added: #0e8a73;
+
+  --font-ui: 'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  /* Одна тень на все панели и один радиус: панели плавают над картой
+     как однородные объекты, а не как набор разных виджетов. */
+  --shadow-card: 0 2px 10px rgba(38, 34, 28, 0.07);
+  --radius: 11px;
+  /* Одинаковый отступ от краёв окна у всех панелей. */
+  --inset: 16px;
+  /* Высота нижнего дока: на неё поднимаются боковые колонки. */
+  --dock-h: 78px;
+  --hover: #f2f6fa;
+  --faint: #a5a099;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/** Все числа — моноширинные с табличными цифрами (требование задачи). */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+}
+
+/* Подложка обязана быть тише данных — гасим и служебные надписи MapLibre. */
+.maplibregl-ctrl-attrib {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.7) !important;
+}
+.maplibregl-ctrl-attrib a {
+  color: var(--ink-soft);
+}
+
+.boot {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--ink-soft);
+  z-index: 40;
+}
+.boot-inner {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+.boot-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--ink);
+}
+.boot-step {
+  font-size: 12px;
+}
+
+/* §16: сервер недоступен — тонкая полоса сверху, карта продолжает работать. */
+.offline-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  background: var(--removed);
+  color: #fff;
+  font-size: 12px;
+  padding: 5px 12px;
+  letter-spacing: 0.02em;
+}
+
+.hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 20;
+}
+.hud > * {
+  pointer-events: auto;
+}
+
+/* Общая оболочка панели: плотный белый фон, один радиус, одна тень.
+   Ничего полупрозрачного и никакого размытия — под панелью карта,
+   и просвечивающая карта мешает читать числа. */
+.panel {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  text-align: left;
+}
+button.panel-head:hover {
+  color: var(--ink);
+}
+.panel-head-title {
+  flex: 1;
+  min-width: 0;
+}
+.panel-head .num {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.panel-chevron {
+  flex: none;
+  font-size: 9px;
+  color: var(--faint);
+  transition: transform 140ms ease-out;
+}
+.panel-chevron.is-open {
+  transform: rotate(90deg);
+}
+.panel-body {
+  padding: 0 10px 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+
+/* нижний док по центру: режимы, слои, история, день и час */
+.dock {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: var(--inset);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  max-width: calc(100vw - 2 * var(--inset));
+  overflow-x: auto;
+}
+.dock-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.dock-sep {
+  flex: none;
+  width: 1px;
+  height: 22px;
+  background: var(--hairline);
+  margin: 0 2px;
+}
+
+.tool {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-soft);
+  flex: none;
+  transition: color 120ms ease-out, background 120ms ease-out;
+}
+.tool:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+.tool[aria-pressed='true'] {
+  background: var(--selected);
+  color: #fff;
+}
+.tool svg {
+  display: block;
+}
+
+/* Две колонки поверх карты. Обе кончаются выше дока: док стоит по центру
+   и на широком экране в колонки не упирается, но на 1280 упёрся бы. */
+.col-left,
+.col-right {
+  position: absolute;
+  top: var(--inset);
+  bottom: calc(var(--inset) + var(--dock-h));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+}
+.col-left > *,
+.col-right > * {
+  pointer-events: auto;
+}
+.col-left {
+  left: var(--inset);
+  width: 330px;
+}
+.col-right {
+  right: var(--inset);
+  width: 348px;
+}
+/* Инспектор забирает свободную высоту, но не всю: показатели — то, ради чего
+   правку делают, и сжимать их до полоски нельзя. Обе панели прокручиваются
+   внутри себя, поэтому содержимое не теряется ни при какой высоте окна. */
+.col-right > .card {
+  flex: 1 1 auto;
+  max-height: 50%;
+}
+.col-right > .metrics {
+  flex: 0 1 auto;
+  min-height: 232px;
+}
+.col-right > .panel {
+  flex: 0 1 auto;
+}
+/* ассистент прижат к низу колонки: он последний и по смыслу, и по месту */
+.col-right > .panel:last-child {
+  margin-top: auto;
+}
+/* раскрытый ассистент должен вмещать хотя бы ответ и поле, иначе от него
+   остаётся полоска и он бесполезен */
+.col-right > .panel.is-open:last-child {
+  min-height: 196px;
+}
+
+/* Режим демонстрации: панели свёрнуты, на карте одна кнопка возврата.
+   Сверху, а не снизу: внизу справа стоит копирайт подложки, и кнопка его
+   перекрывала — а его перекрывать нельзя, это условие лицензии. */
+.demo-restore {
+  position: absolute;
+  right: var(--inset);
+  top: var(--inset);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.demo-restore:hover {
+  color: var(--ink);
+}
+
+/* §12 — плавающая карточка-инспектор */
+.card {
+  width: 100%;
+  min-height: 0;
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  animation: card-in 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    animation-duration: 0ms;
+  }
+}
+
+.card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 12px 0 12px;
+}
+.card-title {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.card-name {
+  font-weight: 500;
+  line-height: 1.3;
+}
+.card-close {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px;
+}
+.card-close:hover {
+  color: var(--ink);
+}
+.card-sub {
+  padding: 8px 12px 0 12px;
+}
+.card-body {
+  padding: 10px 12px 12px 12px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.card-section {
+  margin: 12px 0 6px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.card-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 6px;
+}
+.btn {
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--ink);
+  text-decoration: none;
+  transition: border-color 120ms ease-out;
+}
+.btn:hover {
+  border-color: var(--ink-soft);
+}
+
+/* щиток номера маршрута — как дорожный знак (§3.4) */
+.shield {
+  display: inline-block;
+  background: var(--selected);
+  color: #fff;
+  font-size: 11px;
+  border-radius: 3px;
+  padding: 3px 6px;
+  line-height: 1;
+}
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.seg-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.seg-btn[aria-pressed='true'] {
+  background: var(--selected);
+  color: #fff;
+}
+
+.rows {
+  margin: 0;
+  display: grid;
+  gap: 3px;
+}
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.row dt {
+  color: var(--ink-soft);
+  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+}
+.row dd {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.muted {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.caveat {
+  margin: 10px 0 0;
+  padding: 7px 9px;
+  background: #faf7ef;
+  border-left: 2px solid var(--warn);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink);
+}
+
+.chain {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-left: 2px solid var(--selected);
+}
+.chain-stop {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 6px;
+  text-align: left;
+}
+.chain-stop:hover {
+  background: #f2f6fa;
+}
+.chain-seq {
+  width: 22px;
+  font-size: 11px;
+  color: var(--ink-soft);
+  flex: none;
+}
+.chain-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+.chain-time {
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.chain-stop.is-added .chain-name {
+  color: var(--added);
+}
+.chain-stop.is-added .chain-seq {
+  color: var(--added);
+}
+
+.serving {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 2px;
+}
+.serving-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 4px;
+  text-align: left;
+}
+.serving-btn:hover {
+  background: #f2f6fa;
+}
+.serving-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.warns {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.warns li {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.badge {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 2px;
+  background: var(--warn);
+  color: #fff;
+  font-size: 10px;
+  line-height: 13px;
+  text-align: center;
+}
+.badge-info {
+  background: #b9b4aa;
+}
+.badge-error {
+  background: var(--removed);
+}
+
+/* §13 — блок показателей: две группы, «было → стало» у изменившихся */
+.metrics {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.metrics-body {
+  padding: 0 12px 11px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.m-group + .m-group {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+.m-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.m-group-head .shield {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.m-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+}
+.m-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.m-val {
+  flex: none;
+  font-size: 14px;
+  white-space: nowrap;
+  transition: opacity 220ms ease-out, color 220ms ease-out;
+}
+/* Неизменившееся видно, но приглушено: пропажа строки читается как ошибка,
+   а одинаковая яркость прячет то единственное, что сдвинулось. */
+.m-row.is-same .m-val {
+  color: var(--faint);
+}
+.m-was {
+  color: var(--faint);
+}
+.m-arrow {
+  color: #c9c4bc;
+  padding: 0 4px;
+}
+/* пока идёт пересчёт, числа гаснут, но не исчезают и не сменяются спиннером */
+.metrics.is-pending .m-val {
+  opacity: 0.4;
+}
+.gain {
+  color: var(--added);
+}
+.loss {
+  color: var(--removed);
+}
+/* строка-итог под группами: доли города одной фразой */
+.cons-foot {
+  margin-top: 9px;
+  padding-top: 7px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+.cons-warns {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.cons-warns li {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.cons-note {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.cons-note.error {
+  color: var(--removed);
+}
+.cons-source {
+  margin-top: 4px;
+  font-size: 10px;
+  color: #a5a099;
+}
+
+/* §8.4 — список остановок для вставки */
+.picker {
+  position: absolute;
+  width: 240px;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 8px 10px;
+  z-index: 5;
+}
+.picker-head,
+.history-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  margin-bottom: 6px;
+}
+.picker-head span,
+.history-head span {
+  flex: 1;
+}
+.picker-empty {
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.4;
+}
+.picker-list,
+.history-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.picker-list button,
+.history-list button {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 4px;
+  text-align: left;
+  font-size: 12px;
+}
+.picker-list button:hover,
+.history-list button:hover {
+  background: #f2f6fa;
+}
+.picker-name,
+.history-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* список правок раскрывается над доком — там же, где кнопка, которая его звала */
+.history {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--inset) + var(--dock-h));
+  width: 320px;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 9px 12px;
+}
+
+/* поля настройки расписания */
+.fields {
+  display: flex;
+  gap: 8px;
+}
+.field {
+  flex: 1;
+  display: grid;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.field input {
+  width: 100%;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  background: #fff;
+}
+.field input[aria-invalid='true'] {
+  border-color: var(--removed);
+}
+
+.sched {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.sched td {
+  padding: 2px 0;
+  vertical-align: baseline;
+}
+.sched-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+.sched-was {
+  text-align: right;
+  color: #b0aba2;
+  padding-right: 8px;
+}
+.sched-now {
+  text-align: right;
+}
+.sched tr.changed .sched-now {
+  color: var(--selected);
+  font-weight: 500;
+}
+
+.edit-hint {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: var(--inset);
+  max-width: min(560px, calc(100vw - 760px));
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 8px 13px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-soft);
+}
+
+.tool:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Час: компактный шаг влево-вправо, сетка 05–23 раскрывается по клику.
+   Сплошная лента на весь экран уступила место карте. */
+.hourpick {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: none;
+}
+.hour-step {
+  width: 24px;
+  height: 34px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.hour-step:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+.hour-step:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.hour-now {
+  height: 34px;
+  padding: 0 9px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--ink);
+}
+.hour-now:hover {
+  background: var(--hover);
+}
+.hour-grid {
+  position: absolute;
+  bottom: calc(100% + 9px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: grid;
+  grid-template-columns: repeat(5, 38px);
+  gap: 2px;
+  padding: 6px;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  z-index: 9;
+}
+.hour {
+  height: 28px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.hour:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.hour[aria-pressed='true'] {
+  background: var(--selected);
+  color: #fff;
+}
+
+/* сводка по сети — внизу левой колонки, под списком маршрутов */
+.legend {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 9px 12px;
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-soft);
+  flex: none;
+}
+.legend b {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* §7 — подсказка по гексагону */
+.hex-tip {
+  position: absolute;
+  background: var(--card);
+  border-radius: 7px;
+  box-shadow: var(--shadow-card);
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--ink);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 6;
+}
+
+.hex-tip-state {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+/* легенда слоя населения: цвет всегда рядом со словом */
+.hex-legend {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 9px 12px;
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink);
+  flex: none;
+}
+.hex-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.hex-legend-note {
+  margin-top: 2px;
+  color: var(--ink-soft);
+}
+.sw {
+  width: 14px;
+  height: 12px;
+  flex: none;
+  border-radius: 2px;
+}
+.sw-covered {
+  background: rgba(0, 155, 138, 0.16);
+  border: 0.6px solid rgba(255, 255, 255, 0.9);
+}
+.sw-frequent {
+  background: rgba(0, 155, 138, 0.16);
+  border: 1.1px solid rgba(0, 155, 138, 0.75);
+}
+.sw-uncovered {
+  background: transparent;
+  border: 0.9px solid rgba(194, 86, 63, 0.6);
+}
+
+.chain-nodes {
+  margin-left: 6px;
+  font-size: 10px;
+  color: #a5a099;
+}
+
+/* §15 — командная строка сверху слева */
+/* командная строка — первый элемент левой колонки; выпадашка ложится
+   поверх карточки, поэтому у неё своя позиция и слой */
+.command {
+  position: relative;
+  width: 100%;
+  flex: none;
+  z-index: 8;
+}
+.command-input {
+  width: 100%;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow-card);
+  padding: 9px 11px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+}
+.command-input::placeholder {
+  color: #a5a099;
+}
+.command-input:focus {
+  outline: none;
+  border-color: var(--selected);
+}
+.command-busy {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.command-drop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.command-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 5px 6px;
+  border-radius: 4px;
+  text-align: left;
+  font-size: 12px;
+}
+.command-row.is-cursor {
+  background: #f2f6fa;
+}
+.command-kind {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+.command-kind.kind-phrase {
+  color: var(--selected);
+}
+.command-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.command-fuzzy {
+  flex: none;
+  font-size: 10px;
+  color: #a5a099;
+}
+.command-understood {
+  margin-top: 4px;
+  max-height: 96px;
+  overflow-y: auto;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 7px 9px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink);
+}
+
+.cons-explain {
+  margin-top: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 4px 9px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.cons-explain:disabled {
+  color: var(--ink-soft);
+  cursor: default;
+}
+.cons-text {
+  margin: 6px 0 0;
+  /* объяснение бывает длинным; четыре числа сверху важнее и не должны
+     выдавливаться за край экрана, поэтому текст прокручивается сам */
+  max-height: 170px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+/* контекстное меню правой кнопки */
+.menu {
+  position: absolute;
+  min-width: 210px;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 4px;
+  z-index: 9;
+}
+.menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 4px;
+  text-align: left;
+  font-size: 12px;
+}
+.menu-item:hover:not(:disabled) {
+  background: #f2f6fa;
+}
+.menu-item:disabled {
+  color: var(--ink-soft);
+  cursor: default;
+}
+.menu-label {
+  flex: 1;
+  min-width: 0;
+}
+.menu-hint {
+  flex: none;
+  font-size: 10px;
+  color: #a5a099;
+}
+
+/* §9 — подсказка бейджа: правил в точке может быть несколько */
+.warn-tip {
+  max-width: 260px;
+  white-space: normal;
+  display: grid;
+  gap: 3px;
+  border-left: 2px solid var(--warn);
+}
+
+/* §10 — режимы 1…3 в доке */
+.mode-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.mode-btn:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.mode-btn[aria-pressed='true'] {
+  background: var(--selected);
+  color: #fff;
+}
+.mode-key {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* §3.1 — щиток сравниваемого маршрута */
+.shield-compare {
+  background: #c97a16;
+}
+
+.compare {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.compare td {
+  padding: 3px 0;
+  vertical-align: baseline;
+}
+.compare-label {
+  color: var(--ink-soft);
+}
+.compare-left,
+.compare-right {
+  text-align: right;
+  width: 92px;
+  padding-left: 8px;
+  white-space: nowrap;
+}
+/* режим работы — самая длинная строка, ей мелкий кегль, иначе колонки слипаются */
+.compare tr:last-child .compare-left,
+.compare tr:last-child .compare-right {
+  font-size: 11px;
+}
+.compare-left {
+  color: var(--selected);
+}
+.compare-right {
+  color: #c97a16;
+}
+
+/* ── список маршрутов (левая колонка) ───────────────────────────────── */
+
+/* Строка крупнее прежней: щиток, направление и интервал должны читаться
+   с расстояния, а не разбираться прищурившись. */
+.route-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 8px;
+  text-align: left;
+}
+.route-row:hover {
+  background: var(--hover);
+}
+.route-row.is-on {
+  background: #e9f1f9;
+}
+.route-row.is-on .route-name {
+  color: var(--ink);
+}
+.route-main {
+  flex: 1;
+  min-width: 0;
+  display: block;
+}
+.route-name {
+  display: block;
+  font-size: 12.5px;
+  line-height: 1.3;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.route-sub {
+  display: block;
+  font-size: 11px;
+  color: var(--faint);
+}
+.route-hw {
+  display: block;
+  flex: none;
+  text-align: right;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.route-hw-sub {
+  display: block;
+  font-size: 10px;
+  color: var(--faint);
+}
+.route-filter {
+  width: 100%;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: #fff;
+  padding: 6px 9px;
+  margin-bottom: 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+}
+.route-filter:focus {
+  outline: none;
+  border-color: var(--selected);
+}
+.route-empty {
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+/* ── ассистент (низ правой колонки) ─────────────────────────────────── */
+
+.as-body {
+  padding: 0 12px 11px;
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.as-you {
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.as-text {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink);
+  /* ответ приходит абзацами со списками — переносы значащие */
+  white-space: pre-wrap;
+}
+/* Ожидание видно всегда: без него кажется, что кнопка не сработала. */
+.as-wait {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.as-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--selected);
+  animation: as-pulse 900ms ease-in-out infinite;
+}
+@keyframes as-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .as-dot {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+.as-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.as-apply {
+  border: 1px solid var(--selected);
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--selected);
+  text-align: left;
+}
+.as-apply:hover {
+  background: #eaf2fa;
+}
+.as-applied {
+  border-color: var(--hairline);
+  color: var(--faint);
+  cursor: default;
+}
+.as-note {
+  font-size: 11px;
+  color: var(--faint);
+}
+.as-ask {
+  display: flex;
+  gap: 6px;
+  padding: 0 10px 10px;
+}
+.as-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: #fff;
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.as-input:focus {
+  outline: none;
+  border-color: var(--selected);
+}
+.as-send {
+  flex: none;
+  border-radius: 8px;
+  padding: 0 11px;
+  background: var(--selected);
+  color: #fff;
+  font-size: 12px;
+}
+.as-send:disabled {
+  background: var(--hairline);
+  color: var(--faint);
+  cursor: default;
+}
+
+/* день недели в доке — тот же сегментный переключатель, что в карточке */
+.dock .seg {
+  border-radius: 8px;
+}
+.dock .seg-btn {
+  height: 34px;
+  padding: 0 10px;
+}
+
+/* сводка по данным прижата к низу левой колонки */
+.col-foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: none;
+}
+.panel-head-num {
+  flex: none;
+  color: var(--faint);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.m-route + .m-route {
+  margin-top: 8px;
+}
