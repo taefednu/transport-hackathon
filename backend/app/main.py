@@ -11,6 +11,7 @@ import polars as pl
 import shapely
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app import (
     assistant as assistant_mod,
@@ -635,3 +636,11 @@ def export_route(route_num: str, direction: str = Query(default="fwd")) -> dict:
                 }
             )
     return {"type": "FeatureCollection", "features": features}
+
+
+# Раздача собранного фронтенда — последней строкой файла и не случайно.
+# Монтирование на «/» перехватывает любой путь, поэтому оно обязано быть
+# зарегистрировано после всех эндпоинтов: Starlette выбирает первый
+# подошедший маршрут, а этот подходит ко всему.
+if config.STATIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=config.STATIC_DIR, html=True), name="ui")
