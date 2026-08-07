@@ -42,7 +42,7 @@ import {
   type WarningPoint,
 } from './overlayLayer'
 import type { BusPosition } from './buses'
-import { cumulative, projectOnLine, pointAtMeasure } from './geo'
+import { cumulative, distanceM, projectOnLine, pointAtMeasure } from './geo'
 import type { BaselineHex, Hole, ScenarioResult } from './api'
 import type { LngLat } from './geo'
 import { HIT } from './tokens'
@@ -319,9 +319,9 @@ export function MapView(props: MapViewProps): React.JSX.Element {
        */
       const refreshDraft = (point: ScreenPoint) => {
         if (!dragging.current) return
-        const stop = stopAt(point, SNAP_PX)
-        const snappedId = stop ? String(stop.properties?.stop_id ?? '') : null
-        const snapCoord = stop ? ((stop.geometry as GeoPoint).coordinates as LngLat) : null
+        const stop = nearestStop(point)
+        const snappedId = stop?.id ?? null
+        const snapCoord = stop?.coord ?? null
         const cursor = map.unproject([point.x, point.y])
         setDraft(
           map,
@@ -332,6 +332,31 @@ export function MapView(props: MapViewProps): React.JSX.Element {
           dragging.current.snapped = snappedId
           latest.current.onExtendPreview(snappedId)
         }
+      }
+
+      /**
+       * Ближайшая остановка к курсору — по данным, а не по отрисованному.
+       *
+       * `queryRenderedFeatures` для притяжения не годится: ниже зума 13 у слоя
+       * остановок прозрачность нулевая и радиус нулевой, то есть на обзорном
+       * масштабе он не возвращает ничего даже в рамке 150 px. Продлить маршрут,
+       * не приблизившись, было физически нельзя — и это читалось как «тяжело
+       * попасть». Считаем по координатам: остановок 3 422, перебор на кадр
+       * дешевле одного запроса к отрисовке.
+       */
+      const nearestStop = (point: ScreenPoint) => {
+        const cursor = map.unproject([point.x, point.y])
+        const edge = map.unproject([point.x + SNAP_PX, point.y])
+        const limitM = distanceM([cursor.lng, cursor.lat], [edge.lng, edge.lat])
+        let best: { id: string; coord: LngLat; d: number } | null = null
+        for (const f of latest.current.stops.features) {
+          const coord = f.geometry.coordinates
+          const d = distanceM([cursor.lng, cursor.lat], coord)
+          if (d <= limitM && (!best || d < best.d)) {
+            best = { id: f.properties.stop_id, coord, d }
+          }
+        }
+        return best
       }
 
       /**
