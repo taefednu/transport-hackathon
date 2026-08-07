@@ -191,6 +191,9 @@ button.panel-head:hover {
   background: var(--card);
   border-radius: var(--radius);
   box-shadow: var(--shadow-card);
+  /* max-content, а не сжатие по месту: без него ширина округляется вниз и
+     полоса прокрутки появляется на ровном месте из-за трёх лишних пикселей */
+  width: max-content;
   max-width: calc(100vw - 2 * var(--inset));
   overflow-x: auto;
 }
@@ -942,17 +945,41 @@ button.panel-head:hover {
   flex: none;
   border-radius: 2px;
 }
-.sw-covered {
-  background: rgba(0, 155, 138, 0.16);
-  border: 0.6px solid rgba(255, 255, 255, 0.9);
+/* три ступени плотности — те же цвета и та же альфа, что у слоя */
+.sw-ramp {
+  display: flex;
+  flex: none;
+}
+.sw-ramp .sw {
+  border-radius: 0;
+}
+.sw-ramp .sw:first-child {
+  border-radius: 2px 0 0 2px;
+}
+.sw-ramp .sw:last-child {
+  border-radius: 0 2px 2px 0;
+}
+.sw-d1 {
+  background: rgba(205, 231, 227, 0.55);
+}
+.sw-d2 {
+  background: rgba(111, 191, 182, 0.55);
+}
+.sw-d3 {
+  background: rgba(0, 121, 108, 0.55);
 }
 .sw-frequent {
-  background: rgba(0, 155, 138, 0.16);
-  border: 1.1px solid rgba(0, 155, 138, 0.75);
+  background: transparent;
+  border: 1.4px solid rgba(233, 169, 60, 0.9);
 }
 .sw-uncovered {
   background: transparent;
-  border: 0.9px solid rgba(194, 86, 63, 0.6);
+  border: 1.2px solid rgba(194, 86, 63, 0.75);
+}
+.hex-legend-scale {
+  margin: -1px 0 3px 49px;
+  font-size: 10px;
+  color: var(--faint);
 }
 
 .chain-nodes {
@@ -1396,4 +1423,312 @@ button.panel-head:hover {
 }
 .m-route + .m-route {
   margin-top: 8px;
+}
+
+/* ── подписи и подсказки ────────────────────────────────────────────── */
+
+/* Пунктир говорит, что у подписи есть пояснение при наведении. Без него
+   подсказку никто не ищет, и она с тем же успехом могла не существовать. */
+.hinted {
+  border-bottom: 1px dotted var(--faint);
+  cursor: help;
+}
+
+.m-group-note {
+  margin: -2px 0 5px;
+  font-size: 11px;
+  color: var(--faint);
+}
+.m-note {
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--faint);
+}
+
+/* главные действия карточки: наверху и заметные */
+.card-actions-primary {
+  margin-top: 10px;
+  margin-bottom: 2px;
+}
+.btn-primary {
+  background: var(--selected);
+  border-color: var(--selected);
+  color: #fff;
+  font-size: 12.5px;
+  padding: 6px 12px;
+}
+.btn-primary:hover:not(:disabled) {
+  background: #0d5493;
+  border-color: #0d5493;
+}
+.btn-primary[aria-pressed='true'] {
+  background: #fff;
+  color: var(--selected);
+}
+.btn-primary:disabled {
+  background: var(--hairline);
+  border-color: var(--hairline);
+  color: var(--faint);
+  cursor: default;
+}
+
+/* подпись про границы данных в доке */
+.dock-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-right: 4px;
+  font-size: 11px;
+  line-height: 1.15;
+  color: var(--ink-soft);
+  cursor: help;
+  flex: none;
+}
+.dock-label-sub {
+  font-size: 10px;
+  color: var(--faint);
+}
+
+/* инструкция к правке — держится до первого действия */
+.edit-guide {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: var(--inset);
+  width: 380px;
+  max-width: calc(100vw - 760px);
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 10px 13px 11px;
+}
+.edit-guide-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.edit-guide-head .card-close {
+  margin-left: auto;
+}
+.edit-guide-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink);
+}
+.edit-guide-list b {
+  font-weight: 500;
+  color: var(--selected);
+}
+/* кружки в подсказке повторяют ручки на карте — иначе связь не читается */
+.guide-dot {
+  display: inline-block;
+  vertical-align: -1px;
+  width: 11px;
+  height: 11px;
+  margin-right: 4px;
+  border-radius: 50%;
+  border: 2px solid var(--selected);
+}
+.guide-dot-tail {
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(15, 95, 166, 0.14);
+}
+.guide-dot-head {
+  background: var(--selected);
+}
+
+/* ── маршруты, требующие внимания ───────────────────────────────────── */
+
+.att-row {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
+  text-align: left;
+}
+.att-row:hover {
+  background: var(--hover);
+}
+.att-row.is-on {
+  background: #e9f1f9;
+}
+.att-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.att-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.att-score {
+  flex: none;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+/* полоска рядом с оценкой: одна цифра без шкалы ничего не говорит */
+.att-bar {
+  display: block;
+  height: 3px;
+  margin: 5px 0 4px;
+  border-radius: 2px;
+  background: var(--hairline);
+  overflow: hidden;
+}
+.att-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--warn);
+}
+.att-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.att-reasons {
+  display: grid;
+  gap: 2px;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--faint);
+}
+
+.att-excluded {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--hairline);
+}
+.att-excluded-btn {
+  width: 100%;
+  text-align: left;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--ink-soft);
+}
+.att-excluded-btn:hover {
+  color: var(--ink);
+}
+.att-excluded-list {
+  margin: 5px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 3px;
+}
+.att-excluded-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  width: 100%;
+  padding: 3px 4px;
+  border-radius: 6px;
+  text-align: left;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--ink-soft);
+}
+.att-excluded-row:hover {
+  background: var(--hover);
+}
+.att-note {
+  margin-top: 5px;
+  font-size: 10px;
+  color: var(--faint);
+}
+
+/* ── варианты продления ─────────────────────────────────────────────── */
+
+.opts {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+.opt {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 9px 10px 10px;
+}
+.opt-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-bottom: 6px;
+}
+.opt-target {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+.opt-dir {
+  font-size: 11px;
+}
+.opt-rows {
+  margin: 0;
+  display: grid;
+  gap: 2px;
+}
+.opt-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.opt-row dt {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+}
+.opt-row dd {
+  margin: 0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+/* уровень уверенности в цели: прятать его нельзя, но и кричать незачем */
+.opt-conf {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.opt-conf-osm_only {
+  color: #9a7a2e;
+}
+.opt-note {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--faint);
+}
+.opt-apply {
+  margin-top: 8px;
+  width: 100%;
+  text-align: center;
+}
+.opt-apply.is-applied {
+  background: #fff;
+  border-color: var(--hairline);
+  color: var(--faint);
+  cursor: default;
 }

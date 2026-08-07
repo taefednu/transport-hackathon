@@ -1,50 +1,11 @@
-# --- ДАННЫЕ: НЕ КОММИТИТЬ НИКОГДА ---
-# Датасет выдан только для трека 3 хакатона. Публикация запрещена условиями использования.
-# data/raw — симлинк на выданный датасет, data/processed — производные от него.
-data/
-*.csv
-*.xlsx
-*.pbf
-*.shp
-*.dbf
-*.shx
-*.prj
-*.cpg
-*.geojson
-*.parquet
-*.tif
-*.tiff
-
-# Секреты
 .env
-.env.*
-!.env.example
-*.key
-*.pem
-
-# Python
-.venv/
-venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.ipynb_checkpoints/
-
-# Node
+data/
+*.parquet
+*.pkl
+*.csv
+*.pbf
+*.gpkg
 node_modules/
 dist/
-.vite/
-*.log
-
-# OS / редакторы
-.DS_Store
-Thumbs.db
-.idea/
-*.swp
-
-# Локальные настройки Claude (не общие для команды)
-.claude/settings.local.json
-
-# Временное
-scratchpad/
-tmp/
+__pycache__/
+.venv/

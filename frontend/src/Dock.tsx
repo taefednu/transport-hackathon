@@ -24,16 +24,40 @@ import { HourPicker } from './TimeScale'
 export type Tool = 'select' | 'edit' | 'insert'
 export type Mode = 'base' | 'scenario' | 'compare' | 'holes'
 
-const WEEKDAYS: [Weekday, string][] = [
-  ['fri', 'пт'],
-  ['sat', 'сб'],
-  ['sun', 'вс'],
+/**
+ * Дней ровно три, потому что выгрузка — за 1–3 мая 2026, пятницу, субботу
+ * и воскресенье. Это граница данных, а не незаконченный переключатель, и
+ * подпись рядом должна это говорить.
+ *
+ * У воскресенья особый случай: оплаты за него есть, а времени хода по трафику
+ * нет — данные о скоростях выгружены за среду, пятницу и субботу. Поэтому в
+ * воскресенье считаются интервалы и посадки, но не оборот и не парк.
+ */
+const WEEKDAYS: [Weekday, string, string][] = [
+  ['fri', 'пт', 'пятница, 1 мая 2026'],
+  ['sat', 'сб', 'суббота, 2 мая 2026'],
+  [
+    'sun',
+    'вс*',
+    'воскресенье, 3 мая 2026. Оплаты есть, времени хода по трафику нет — ' +
+      'его выгрузили за среду, пятницу и субботу. Интервалы и посадки посчитаются, ' +
+      'оборот, парк и расписание — нет.',
+  ],
 ]
 
-const MODES: [Mode, string, string][] = [
-  ['base', '1', 'база'],
-  ['scenario', '2', 'сценарий'],
-  ['compare', '3', 'сравнение'],
+const DAYS_NOTE =
+  'Выгрузка организаторов — за 1–3 мая 2026: пятницу, субботу и воскресенье. ' +
+  'Других дней в данных нет. У воскресенья нет времени хода по трафику.'
+
+const MODES: [Mode, string, string, string][] = [
+  ['base', '1', 'база', 'Сеть как она есть сегодня: правки сценария на карте не рисуются и в числа не входят.'],
+  ['scenario', '2', 'сценарий', 'Сеть с вашими правками: изменённые трассы, ячейки, которые получили или потеряли доступ.'],
+  [
+    'compare',
+    '3',
+    'сравнение',
+    'Два маршрута рядом: кликните по второму, он станет оранжевым, числа встанут в таблицу на две колонки.',
+  ],
 ]
 
 export interface DockProps {
@@ -154,12 +178,12 @@ export function Dock(props: DockProps): React.JSX.Element {
       <div className="dock-sep" />
 
       <div className="dock-group">
-        {MODES.map(([key, digit, label]) => (
+        {MODES.map(([key, digit, label, hint]) => (
           <button
             key={key}
             className="mode-btn"
             aria-pressed={props.mode === key}
-            title={`${label} (${digit})`}
+            title={`${hint} Клавиша ${digit}.`}
             onClick={() => props.onMode(key)}
           >
             {label}
@@ -170,12 +194,17 @@ export function Dock(props: DockProps): React.JSX.Element {
       <div className="dock-sep" />
 
       <div className="dock-group">
-        <div className="seg">
-          {WEEKDAYS.map(([key, label]) => (
+        <span className="dock-label" title={DAYS_NOTE}>
+          <span className="hinted">данные</span>
+          <span className="dock-label-sub num">1–3 мая</span>
+        </span>
+        <div className="seg" title={DAYS_NOTE}>
+          {WEEKDAYS.map(([key, label, hint]) => (
             <button
               key={key}
               className="seg-btn"
               aria-pressed={props.weekday === key}
+              title={hint}
               onClick={() => props.onWeekday(key)}
             >
               {label}

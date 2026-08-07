@@ -87,7 +87,7 @@ def meta() -> dict:
             {
                 "name": "Yandex stop accessibility",
                 "detail": "stations.csv, срез 30.09.2025",
-                "license": "предоставлено организаторами трека 3",
+                "license": "предоставлено организаторами хакатона",
             },
             {
                 "name": "OpenStreetMap",
@@ -432,6 +432,61 @@ def baseline(
     if weekday not in config.WEEKDAY_TYPES:
         raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
     return coverage.baseline(store(), weekday, hour)
+
+
+@app.get("/api/diagnostics/attention")
+def diagnostics_attention(
+    weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
+    hour: int = Query(default=8, ge=0, le=23),
+    limit: int = Query(default=12, ge=1, le=50),
+) -> dict:
+    """Маршруты, требующие внимания, — ранжированный список без модели.
+
+    Тот же расчёт, что зовёт ассистент, но доступный напрямую: диагностика
+    нужна и тогда, когда сети нет или ключа модели нет.
+    """
+    if weekday not in config.WEEKDAY_TYPES:
+        raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
+    return diagnostics.attention(store(), weekday, hour, limit)
+
+
+@app.get("/api/routes/{route_num}/options")
+def route_options(
+    route_num: str,
+    weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
+    hour: int = Query(default=8, ge=0, le=23),
+    direction: str | None = Query(default=None),
+) -> dict:
+    """Варианты продления маршрута из перебора. Ничего не применяет."""
+    if weekday not in config.WEEKDAY_TYPES:
+        raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
+    try:
+        return tools.route_options(
+            store(),
+            STATE["search_index"],
+            {"route_num": route_num, "weekday": weekday, "hour": hour, "direction": direction},
+        )
+    except tools.ToolError as exc:
+        # это не сбой сервера: подбор не делается по названной причине,
+        # и причину надо показать человеку, а не прятать за пятисоткой
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/holes/{h3}/options")
+def hole_options(
+    h3: str,
+    weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
+    hour: int = Query(default=8, ge=0, le=23),
+) -> dict:
+    """Чем закрыть конкретную дыру покрытия и какой ценой."""
+    if weekday not in config.WEEKDAY_TYPES:
+        raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
+    try:
+        return tools.hole_options(
+            store(), STATE["search_index"], {"h3": h3, "weekday": weekday, "hour": hour}
+        )
+    except tools.ToolError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/api/headways")

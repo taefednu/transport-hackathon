@@ -296,6 +296,90 @@ export interface WalkZone {
   edges: { coords: [number, number][]; d: number }[]
 }
 
+/**
+ * Диагностика и подбор. Всё считает ядро без модели: продукт обязан работать
+ * без сети и без ключа, ассистент — дополнительный вход, а не единственный.
+ */
+export interface AttentionRoute {
+  route_num: string
+  name: string
+  score: number
+  planned_headway_min: number | null
+  actual_headway_min: number | null
+  n_vehicles: number | null
+  n_boardings: number | null
+  length_km: number | null
+  n_stops: number | null
+  quality: Quality
+  fallback_share: number | null
+  /** Готовые формулировки признаков: числа в них — из самого признака. */
+  reasons: string[]
+}
+
+export interface Attention {
+  weekday: Weekday
+  hour: number
+  routes_total: number
+  routes_with_signs: number
+  routes_shown: number
+  /** Маршруты с невозможными исходными значениями: в ранжирование не берутся. */
+  excluded_unreliable: { route_num: string; reasons: string[] }[]
+  excluded_count: number
+  routes: AttentionRoute[]
+}
+
+/** Уверенность в том, что цель продления сейчас никем не обслуживается. */
+export type OptionConfidence = 'yandex_confirmed' | 'osm_only'
+
+export interface ExtensionOption {
+  route_num: string
+  direction: Direction
+  stop_id: string
+  stop_name: string
+  confidence: OptionConfidence | null
+  lat: number
+  lon: number
+  tail_km: number
+  /** Прирост именно от новой остановки, без пересчёта цепочки. */
+  gained_people: number
+  chain_recount_people: number
+  lost_people: number
+  cycle_time_before_min: number
+  cycle_time_after_min: number
+  required_vehicles_before: number
+  required_vehicles_after: number
+  extra_vehicles: number
+  /** Готово для POST /api/scenario — применяет человек, не ядро. */
+  scenario: { weekday: Weekday; hour: number; ops: ScenarioOp[] }
+}
+
+export interface RouteOptions {
+  route_num: string
+  options: ExtensionOption[]
+  options_found: number
+  candidates_checked: number
+  candidates_off_housing: number
+  housing_radius_m: number
+  min_housing_buildings: number
+  max_extra_vehicles: number
+  note: string
+}
+
+export interface HoleOptions {
+  h3: string
+  people: number
+  covered: boolean
+  /** Остановок рядом, про которые известно, что их никто не обслуживает. */
+  targets_nearby: number
+  routes_checked: number
+  options: ExtensionOption[]
+  options_found: number
+  /** Почему вариантов нет. null — они есть. */
+  reason: string | null
+  max_extra_vehicles: number
+  max_length_share: number
+}
+
 /** Фактический интервал за один час: приходит только по маршрутам с рейсами. */
 export interface HourHeadway {
   route_num: string
@@ -411,6 +495,18 @@ export const api = {
     post<NlScenario>('/api/nl/scenario', { text, weekday, hour }),
   headways: (weekday: Weekday, hour: number) =>
     req<Headways>(`/api/headways?weekday=${weekday}&hour=${hour}`),
+  attention: (weekday: Weekday, hour: number, limit = 12) =>
+    req<Attention>(`/api/diagnostics/attention?weekday=${weekday}&hour=${hour}&limit=${limit}`),
+  routeOptions: (routeNum: string, weekday: Weekday, hour: number, signal?: AbortSignal) =>
+    req<RouteOptions>(
+      `/api/routes/${encodeURIComponent(routeNum)}/options?weekday=${weekday}&hour=${hour}`,
+      { signal },
+    ),
+  holeOptions: (h3: string, weekday: Weekday, hour: number, signal?: AbortSignal) =>
+    req<HoleOptions>(
+      `/api/holes/${encodeURIComponent(h3)}/options?weekday=${weekday}&hour=${hour}`,
+      { signal },
+    ),
   assistant: (text: string, weekday: Weekday, hour: number) =>
     post<AssistantAnswer>('/api/assistant', { text, weekday, hour }),
   explain: (result: ScenarioResult) => post<Explanation>('/api/explain', result),

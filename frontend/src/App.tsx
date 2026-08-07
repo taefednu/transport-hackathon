@@ -4,6 +4,7 @@ import {
   api,
   type AssistantAction,
   type Baseline,
+  type BaselineHex,
   type Direction,
   type HourHeadway,
   type Meta,
@@ -18,7 +19,14 @@ import {
   type Weekday,
 } from './api'
 import { buildNetwork, type NetworkIndex } from './network'
+import { latLngToCell } from 'h3-js'
 import { MapView, type ContextTarget, type HexHover } from './MapView'
+import { hexScaleOf } from './hexLayer'
+import { AttentionPanel } from './AttentionPanel'
+import { HoleCard } from './HoleCard'
+import { optionKey } from './OptionsBlock'
+import { useHoleOptions, useRouteOptions } from './useOptions'
+import type { Attention, ExtensionOption } from './api'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import type { Selection } from './mapLayers'
 import { readUrl, writeUrl } from './urlState'
@@ -157,11 +165,22 @@ export function App(): React.JSX.Element {
   const [askLog, setAskLog] = useState<AssistantTurn[]>([])
   const [asking, setAsking] = useState(false)
   const [applied, setApplied] = useState<Set<string>>(() => new Set())
+  /** Диагностика: грузится при старте, чтобы список был виден сразу. */
+  const [attention, setAttention] = useState<Attention | null>(null)
+  const [attentionLoading, setAttentionLoading] = useState(true)
+  const [attentionError, setAttentionError] = useState<string | null>(null)
+  const [attentionOpen, setAttentionOpen] = useState(true)
+  /** Выбранная ячейка слоя населения: её карточка живёт в правой колонке. */
+  const [hexCell, setHexCell] = useState<BaselineHex | null>(null)
+  /** Уже применённые варианты продления: кнопка не должна звать дважды. */
+  const [appliedOptions, setAppliedOptions] = useState<Set<string>>(() => new Set())
   const [routesOpen, setRoutesOpen] = useState(false)
   const [metricsOpen, setMetricsOpen] = useState(true)
   const [assistantOpen, setAssistantOpen] = useState(false)
   /** Режим демонстрации: панели убраны, карта на весь экран. */
   const [demo, setDemo] = useState(false)
+  /** Инструкция к правке: висит до первого действия, потом уходит. */
+  const [hintDone, setHintDone] = useState(false)
   const mapRef = useRef<MlMap | null>(null)
 
   useEffect(() => {
@@ -209,6 +228,30 @@ export function App(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weekday, initial.weekday])
 
+  // Диагностика без модели: список проблемных маршрутов должен быть на экране
+  // сразу после загрузки, а не после вопроса ассистенту.
+  useEffect(() => {
+    let cancelled = false
+    setAttentionLoading(true)
+    api
+      .attention(weekday, hour)
+      .then((a) => {
+        if (!cancelled) {
+          setAttention(a)
+          setAttentionError(null)
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setAttentionError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => {
+        if (!cancelled) setAttentionLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [weekday, hour])
+
   // Фактические интервалы — маленький ответ на 169 маршрутов, его можно
   // тянуть при каждом сдвиге часа: без него в списке слева нечего показывать.
   useEffect(() => {
@@ -228,8 +271,12 @@ export function App(): React.JSX.Element {
 
   const data = boot.phase === 'ready' ? boot.data : null
   const baseline = baselineNow ?? data?.baseline ?? null
+  /** Границы шкалы плотности — те же, по которым красится слой. */
+  const hexScale = useMemo(() => hexScaleOf(baseline?.hexes ?? []), [baseline])
   const routeData = useRouteData(selection?.routeNum ?? null, selection?.direction ?? 'fwd', weekday)
   const compareData = useRouteData(compare?.routeNum ?? null, compare?.direction ?? 'fwd', weekday)
+  const routeOptions = useRouteOptions(selection?.routeNum ?? null, weekday, hour)
+  const holeOptions = useHoleOptions(hexCell?.h3 ?? null, weekday, hour)
 
   const stopById = useMemo(() => {
     const map = new Map<string, StopFeature>()
@@ -290,6 +337,7 @@ export function App(): React.JSX.Element {
           stopId,
           seq: index,
           tail: index === chainIds.length - 1,
+          head: index === 0,
           coord: feature.geometry.coordinates,
         }
       })
@@ -387,14 +435,23 @@ export function App(): React.JSX.Element {
 
   const commit = useCallback(
     (op: ScenarioOp) => {
+      // первое действие сделано — инструкция больше не нужна
+      setHintDone(true)
       setScenario((s) => push(s, { op, label: describe(op, stopName), net: null }))
     },
     [stopName],
   )
 
+  // Каждый вход в правку показывает инструкцию заново: набор действий у
+  // «править» и «вставить» разный, и человек редактирует не каждый день.
+  useEffect(() => {
+    if (tool !== 'select') setHintDone(false)
+  }, [tool])
+
   const onSelectRoute = useCallback(
     (routeNum: string, direction: Direction) => {
       setSelectedStop(null)
+      setHexCell(null)
       setEditing(false)
       setPickedSeq(null)
       setShowSchedule(false)
@@ -423,6 +480,7 @@ export function App(): React.JSX.Element {
     setCompare(null)
     setSelection(null)
     setSelectedStop(null)
+    setHexCell(null)
     setEditing(false)
     setPickedSeq(null)
     setShowSchedule(false)
@@ -534,10 +592,48 @@ export function App(): React.JSX.Element {
     [data, onSelectRoute, routesByNum],
   )
 
+  /**
+   * Вариант продления из перебора. Ядро ничего не применяет: сюда приходит
+   * готовый сценарий, и он ложится в историю правок обычной операцией —
+   * дальше его можно отменить, дополнить или откатить, как ручную.
+   */
+  const onApplyOption = useCallback(
+    (option: ExtensionOption) => {
+      onSelectRoute(option.route_num, option.direction)
+      for (const op of option.scenario.ops) commit(op)
+      setAppliedOptions((s) => new Set(s).add(optionKey(option)))
+    },
+    [commit, onSelectRoute],
+  )
+
+  /**
+   * Клик по слою населения. Ячейка считается по координате, а не берётся из
+   * отрисованных слоёв: у непокрытых ячеек нет заливки, и клик в середину
+   * дыры не попадал бы ни во что. Разрешение сетки берём у ядра, а не пишем
+   * восьмёрку руками.
+   */
+  const onHexClick = useCallback(
+    (at: LngLat) => {
+      if (!data || !baseline) return
+      const cell = latLngToCell(at[1], at[0], data.meta.constants.h3_resolution)
+      const hex = baseline.hexes.find((h) => h.h3 === cell)
+      if (!hex) {
+        // за пределами слоя населения клик по пустому месту снимает выбор
+        onClearSelection()
+        return
+      }
+      setSelectedStop(null)
+      setWalkZone(null)
+      setHexCell(hex)
+    },
+    [baseline, data, onClearSelection],
+  )
+
   const onPickStop = useCallback(
     (stopId: string, at: LngLat | null) => {
       // зона относится к конкретной остановке: сменили остановку — сняли зону
       setWalkZone(null)
+      setHexCell(null)
       setSelectedStop(stopId)
       const coord = at ?? stopById.get(stopId)?.geometry.coordinates ?? null
       if (coord) flyTo(coord, 15.5)
@@ -703,6 +799,14 @@ export function App(): React.JSX.Element {
 
   const stopProps = selectedStop ? (stopById.get(selectedStop)?.properties ?? null) : null
 
+  /** Ближайшая обслуживаемая остановка к выбранной ячейке — из списка дыр. */
+  const nearestForCell = useMemo(() => {
+    if (!hexCell || !data) return null
+    const hole = data.holes.find((h) => h.h3_id === hexCell.h3)
+    if (!hole) return null
+    return { name: hole.nearest_stop_name, distanceM: hole.walk_distance_m }
+  }, [hexCell, data])
+
   const serving = useMemo(() => {
     if (!selectedStop) return []
     return (routesByStop.get(selectedStop) ?? [])
@@ -832,6 +936,7 @@ export function App(): React.JSX.Element {
           scenarioResult={mode === 'base' ? null : computation.result}
           compare={compare}
           onHexHover={setHexHover}
+          onHexClick={onHexClick}
           buses={buses.buses}
           selectedLine={selectedLine}
           selectedGaps={selectedGaps}
@@ -890,6 +995,18 @@ export function App(): React.JSX.Element {
               onPhrase={onPhrase}
             />
 
+            {/* Диагностика ядра, а не ответ модели: список виден сразу и
+                работает без сети. */}
+            <AttentionPanel
+              data={attention}
+              loading={attentionLoading}
+              error={attentionError}
+              selected={selection?.routeNum ?? null}
+              open={attentionOpen}
+              onToggle={() => setAttentionOpen((v) => !v)}
+              onPick={onPickRoute}
+            />
+
             <RouteList
               routes={data.routes}
               headways={headways}
@@ -905,15 +1022,22 @@ export function App(): React.JSX.Element {
               {showHexes && (
                 <div className="hex-legend">
                   <div className="hex-legend-row">
-                    <span className="sw sw-frequent" /> в доступе к частой сети
+                    <span className="sw-ramp">
+                      <span className="sw sw-d1" />
+                      <span className="sw sw-d2" />
+                      <span className="sw sw-d3" />
+                    </span>
+                    в пешей доступности, цвет — людей в ячейке
+                  </div>
+                  <div className="hex-legend-scale num">
+                    от {int(hexScale.low)} до {int(hexScale.top)} чел.
                   </div>
                   <div className="hex-legend-row">
-                    <span className="sw sw-covered" /> в пешей доступности
+                    <span className="sw sw-frequent" /> в доступе к частой сети
                   </div>
                   <div className="hex-legend-row">
                     <span className="sw sw-uncovered" /> вне пешей доступности
                   </div>
-                  <div className="hex-legend-note">насыщенность заливки — плотность населения</div>
                 </div>
               )}
 
@@ -935,7 +1059,22 @@ export function App(): React.JSX.Element {
 
           <div className="col-right">
           {/* §12: открыта может быть только одна карточка */}
-          {stopProps ? (
+          {hexCell ? (
+            <HoleCard
+              h3={hexCell.h3}
+              hex={{
+                pop: hexCell.pop,
+                walkMin: hexCell.walk_min,
+                covered: hexCell.covered,
+                frequent: hexCell.frequent,
+              }}
+              nearest={nearestForCell}
+              options={holeOptions}
+              appliedOptions={appliedOptions}
+              onApplyOption={onApplyOption}
+              onClose={() => setHexCell(null)}
+            />
+          ) : stopProps ? (
             <StopCard
               stop={stopProps}
               serving={serving}
@@ -989,6 +1128,9 @@ export function App(): React.JSX.Element {
                 hour={hour}
                 editing={editing}
                 buses={{ count: buses.buses.length, reason: buses.reason }}
+                options={routeOptions}
+                appliedOptions={appliedOptions}
+                onApplyOption={onApplyOption}
                 chainView={chainView}
                 edited={editedRoute}
                 tailIsStraight={tailIsStraight}
@@ -1133,17 +1275,48 @@ export function App(): React.JSX.Element {
             <div className="edit-hint">кликни по второму маршруту — он станет оранжевым и встанет рядом в таблицу</div>
           )}
 
-          {tool === 'insert' && (
-            <div className="edit-hint">
-              кликни по линии маршрута в том месте, где нужна остановка — ядро предложит ближайшие ·
-              Esc — выйти
-            </div>
-          )}
-
-          {tool === 'edit' && (
-            <div className="edit-hint">
-              тяни хвостовую ручку — продлить · Shift+клик по ручке — обрезать · клик по линии — вставить ·
-              Delete — убрать выбранную · Esc — выйти
+          {/* Инструкция к правке. Висит до первого действия и уходит сама:
+              пока человек ничего не сделал, он и не знает, что делать. */}
+          {editing && !hintDone && (
+            <div className="edit-guide">
+              <div className="edit-guide-head">
+                {tool === 'insert' ? 'вставка остановки' : 'правка маршрута'}
+                <button
+                  className="card-close"
+                  aria-label="скрыть подсказку"
+                  onClick={() => setHintDone(true)}
+                >
+                  ✕
+                </button>
+              </div>
+              {tool === 'insert' ? (
+                <ol className="edit-guide-list">
+                  <li>
+                    кликните по линии маршрута там, где нужна остановка — ядро предложит те, что
+                    рядом
+                  </li>
+                  <li>
+                    <b>Esc</b> — выйти
+                  </li>
+                </ol>
+              ) : (
+                <ol className="edit-guide-list">
+                  <li>
+                    <span className="guide-dot guide-dot-tail" /> конец маршрута — крупная ручка с
+                    ореолом: <b>потяните её мышкой</b>, чтобы продлить
+                  </li>
+                  <li>
+                    <span className="guide-dot guide-dot-head" /> начало закрашено и не тянется:
+                    ядро продлевает только с конца
+                  </li>
+                  <li>
+                    <b>Shift + клик</b> по любой ручке — обрезать маршрут до неё
+                  </li>
+                  <li>
+                    <b>клик по линии</b> — вставить остановку, <b>Delete</b> — убрать выбранную
+                  </li>
+                </ol>
+              )}
             </div>
           )}
         </div>

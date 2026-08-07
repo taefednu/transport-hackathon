@@ -149,6 +149,17 @@ def baseline(store: Store, weekday: str, hour: int) -> dict:
     hexes = hex_table(store, served)
     result = summary(store, hexes, weekday, hour)
 
+    # Тот же признак, из которого в summary складывается PNFT-15, но на ячейку.
+    # Без него доля «в доступе к частой» существует только итогом, и третье
+    # состояние покрытия на карте нарисовать нечем.
+    frequent_stops = frequent_stop_ids(store, weekday, hour)
+    frequent_cells = covered_hexes(store, frequent_stops) if frequent_stops else set()
+    hexes = hexes.with_columns(
+        pl.col("h3_id").is_in(list(frequent_cells)).alias("frequent")
+        if frequent_cells
+        else pl.lit(False).alias("frequent")
+    )
+
     # для прозрачности: сколько накрывают вообще все физические остановки,
     # включая те, которые никто не обслуживает
     all_covered = covered_hexes(store)
@@ -167,6 +178,7 @@ def baseline(store: Store, weekday: str, hour: int) -> dict:
             pl.col("h3_id").alias("h3"),
             pl.col("population").alias("pop"),
             "covered",
+            "frequent",
             "walk_min",
             "walk_source",
             "nearest_stop_id",

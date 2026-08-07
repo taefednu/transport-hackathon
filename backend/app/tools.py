@@ -273,6 +273,81 @@ def _candidate_potential(store: Store) -> dict[str, float]:
     return gain
 
 
+def _evaluate_extension(
+    store: Store,
+    *,
+    route_num: str,
+    direction: str,
+    stop_id: str,
+    tail_km: float,
+    weekday: str,
+    hour: int,
+    baseline: float,
+    names: dict,
+    coords: dict,
+    confidence: dict,
+    skipped: list,
+) -> dict | None:
+    """Цена одного продления. `None` — вариант не прошёл отбор.
+
+    Один расчёт на два входа: подбор по маршруту и подбор по дыре покрытия.
+    Числа обязаны совпадать, откуда бы человек ни пришёл, поэтому фильтры
+    и формулировки живут здесь, а не в двух местах.
+    """
+    body = {
+        "weekday": weekday,
+        "hour": hour,
+        "ops": [
+            {
+                "type": "extend_route",
+                "route_num": route_num,
+                "direction": direction,
+                "stops": [stop_id],
+            }
+        ],
+    }
+    try:
+        result = scenario_mod.run(store, weekday, hour, body["ops"])
+    except scenario_mod.ScenarioError as exc:
+        skipped.append({"direction": direction, "reason": str(exc)})
+        return None
+
+    affected = result["affected_routes"][0]
+    before = affected.get("required_vehicles_before")
+    after = affected.get("required_vehicles_after")
+    if before is None or after is None:
+        return None
+    # прирост, который даёт именно новая остановка, а не пересчёт
+    # цепочки: приписывать продлению чужих людей нельзя
+    attributable = result["gained"] - baseline
+    if attributable <= 0:
+        return None
+    if after - before > config.IMPROVEMENT_MAX_EXTRA_VEHICLES:
+        return None
+
+    return {
+        "route_num": route_num,
+        "direction": direction,
+        "action": "продлить до остановки",
+        "stop_id": stop_id,
+        "stop_name": names.get(stop_id) or stop_id,
+        "confidence": confidence.get(stop_id),
+        "lat": coords[stop_id][0],
+        "lon": coords[stop_id][1],
+        "tail_km": round(tail_km, 2),
+        "gained_people": int(round(attributable)),
+        "gained_with_chain_recount": int(round(result["gained"])),
+        "chain_recount_people": int(round(baseline)),
+        "lost_people": int(round(result["lost"])),
+        "cycle_time_before_min": round(affected["cycle_time_before"], 1),
+        "cycle_time_after_min": round(affected["cycle_time_after"], 1),
+        "required_vehicles_before": before,
+        "required_vehicles_after": after,
+        "extra_vehicles": after - before,
+        "scenario": body,
+    }
+
+
 def route_options(store: Store, index: list, params: dict) -> dict:
     """Продления маршрута к необслуживаемым остановкам, посчитанные движком."""
     route_num = _require_route(store, params)
@@ -325,60 +400,22 @@ def route_options(store: Store, index: list, params: dict) -> dict:
         reachable.sort(key=lambda i: -potential.get(candidates[i], 0.0))
         baseline = _chain_baseline(store, route_num, direction, sequence)
         for position in reachable[: config.IMPROVEMENT_CANDIDATES]:
-            tail_km = float(distances[position])
-            stop_id = candidates[position]
-            body = {
-                "weekday": weekday,
-                "hour": hour,
-                "ops": [
-                    {
-                        "type": "extend_route",
-                        "route_num": route_num,
-                        "direction": direction,
-                        "stops": [stop_id],
-                    }
-                ],
-            }
-            try:
-                result = scenario_mod.run(store, weekday, hour, body["ops"])
-            except scenario_mod.ScenarioError as exc:
-                skipped.append({"direction": direction, "reason": str(exc)})
-                continue
-            affected = result["affected_routes"][0]
-            before = affected.get("required_vehicles_before")
-            after = affected.get("required_vehicles_after")
-            if before is None or after is None:
-                continue
-            # прирост, который даёт именно новая остановка, а не пересчёт
-            # цепочки: приписывать продлению чужих людей нельзя
-            attributable = result["gained"] - baseline
-            if attributable <= 0:
-                continue
-            if after - before > config.IMPROVEMENT_MAX_EXTRA_VEHICLES:
-                continue
-            options.append(
-                {
-                    "route_num": route_num,
-                    "direction": direction,
-                    "action": "продлить до остановки",
-                    "stop_id": stop_id,
-                    "stop_name": names.get(stop_id) or stop_id,
-                    "confidence": confidence.get(stop_id),
-                    "lat": coords[stop_id][0],
-                    "lon": coords[stop_id][1],
-                    "tail_km": round(tail_km, 2),
-                    "gained_people": int(round(attributable)),
-                    "gained_with_chain_recount": int(round(result["gained"])),
-                    "chain_recount_people": int(round(baseline)),
-                    "lost_people": int(round(result["lost"])),
-                    "cycle_time_before_min": round(affected["cycle_time_before"], 1),
-                    "cycle_time_after_min": round(affected["cycle_time_after"], 1),
-                    "required_vehicles_before": before,
-                    "required_vehicles_after": after,
-                    "extra_vehicles": after - before,
-                    "scenario": body,
-                }
+            option = _evaluate_extension(
+                store,
+                route_num=route_num,
+                direction=direction,
+                stop_id=candidates[position],
+                tail_km=float(distances[position]),
+                weekday=weekday,
+                hour=hour,
+                baseline=baseline,
+                names=names,
+                coords=coords,
+                confidence=confidence,
+                skipped=skipped,
             )
+            if option:
+                options.append(option)
 
     options.sort(key=lambda o: (-o["gained_people"], o["extra_vehicles"]))
     return {
@@ -427,6 +464,142 @@ def coverage_holes(store: Store, index: list, params: dict) -> dict:
             }
             for row in rows
         ],
+    }
+
+
+def hole_options(store: Store, index: list, params: dict) -> dict:
+    """Что можно сделать с конкретной дырой покрытия.
+
+    Обратная задача к `route_options`: там маршрут известен и ищутся цели,
+    здесь известна ячейка и ищется маршрут, который до неё дотянуть. Числа
+    считает тот же `_evaluate_extension`, поэтому «+N человек» с обеих
+    сторон означает одно и то же.
+
+    Пустой ответ — тоже ответ, и причина у него бывает разная: рядом может
+    не быть ни одной остановки, про которую известно, что её никто не
+    обслуживает; или такая остановка есть, но ни один маршрут не кончается
+    достаточно близко, чтобы продление уложилось в четверть его длины.
+    """
+    cell = str(params.get("h3") or "").strip()
+    if not cell:
+        raise ToolError("нужен идентификатор ячейки h3")
+    weekday, hour = params["weekday"], params["hour"]
+
+    served, covered, population = _coverage_base(store)
+    people = population.get(cell)
+    if people is None:
+        raise ToolError(f"ячейки {cell} нет в слое населения")
+
+    candidates, confidence, _off_housing = _unserved_candidates(store)
+    candidate_set = set(candidates)
+    # остановки, с которых до этой ячейки доходят пешком, — их и надо включать
+    reachers = store.stop_hexes.filter(pl.col("h3_id") == cell)["stop_id"].to_list()
+    targets = [s for s in reachers if s in candidate_set]
+
+    names = dict(zip(store.stops["stop_id"].to_list(), store.stops["name"].to_list()))
+    coords = {
+        row["stop_id"]: (row["lat"], row["lon"])
+        for row in store.stops.select("stop_id", "lat", "lon").iter_rows(named=True)
+    }
+    stop_index = {s: i for i, s in enumerate(store.stops["stop_id"].to_list())}
+
+    reason = None
+    pairs: list[tuple[float, str, str, str]] = []
+    if not targets:
+        reason = (
+            "рядом с ячейкой нет остановки, про которую известно, что её никто "
+            "не обслуживает: продлевать некуда"
+        )
+    else:
+        unreliable = dataquality.unreliable(store)
+        termini = (
+            store.route_stops.sort("seq")
+            .group_by(["route_num", "direction"])
+            .agg(pl.col("stop_id").last().alias("terminus"))
+        )
+        lengths = {
+            (r["route_num"], r["direction"]): r["length_km"]
+            for r in store.routes.select("route_num", "direction", "length_km").iter_rows(
+                named=True
+            )
+        }
+        for row in termini.iter_rows(named=True):
+            key = (row["route_num"], row["direction"])
+            length_km = lengths.get(key)
+            terminus = row["terminus"]
+            if row["route_num"] in unreliable or not length_km or terminus not in stop_index:
+                continue
+            limit_km = config.IMPROVEMENT_MAX_LENGTH_SHARE * float(length_km)
+            for stop_id in targets:
+                if stop_id not in stop_index:
+                    continue
+                tail_km = (
+                    float(
+                        np.hypot(
+                            *(store.stop_xy[stop_index[stop_id]] - store.stop_xy[stop_index[terminus]])
+                        )
+                    )
+                    / 1000.0
+                )
+                if tail_km <= limit_km:
+                    pairs.append((tail_km, row["route_num"], row["direction"], stop_id))
+        # короткий хвост дешевле: считаем сначала его, дальше упираемся в потолок
+        pairs.sort()
+        if not pairs:
+            reason = (
+                "ни один маршрут не кончается достаточно близко: продление до этой "
+                f"ячейки длиннее {int(config.IMPROVEMENT_MAX_LENGTH_SHARE * 100)}% "
+                "длины любого из них"
+            )
+
+    options, skipped = [], []
+    checked = 0
+    for tail_km, route_num, direction, stop_id in pairs[: config.IMPROVEMENT_CANDIDATES * 2]:
+        try:
+            sequence = scenario_mod._route_sequence(store, route_num, direction)
+        except scenario_mod.ScenarioError as exc:
+            skipped.append({"route_num": route_num, "direction": direction, "reason": str(exc)})
+            continue
+        checked += 1
+        option = _evaluate_extension(
+            store,
+            route_num=route_num,
+            direction=direction,
+            stop_id=stop_id,
+            tail_km=tail_km,
+            weekday=weekday,
+            hour=hour,
+            baseline=_chain_baseline(store, route_num, direction, sequence),
+            names=names,
+            coords=coords,
+            confidence=confidence,
+            skipped=skipped,
+        )
+        if option:
+            options.append(option)
+
+    if pairs and not options and reason is None:
+        reason = (
+            "продления считались, но ни одно не прошло отбор: либо оно не добавляет "
+            f"людей сверх пересчёта цепочки, либо требует больше "
+            f"{config.IMPROVEMENT_MAX_EXTRA_VEHICLES} машин сверх нынешнего выпуска"
+        )
+
+    options.sort(key=lambda o: (-o["gained_people"], o["extra_vehicles"]))
+    return {
+        "h3": cell,
+        "weekday": weekday,
+        "hour": hour,
+        "people": int(round(people)),
+        "covered": cell in covered,
+        "targets_nearby": len(targets),
+        "routes_checked": checked,
+        "options": options[: config.ASSISTANT_OPTIONS_LIMIT],
+        "options_found": len(options),
+        "reason": reason,
+        "skipped": skipped,
+        "max_extra_vehicles": config.IMPROVEMENT_MAX_EXTRA_VEHICLES,
+        "max_length_share": config.IMPROVEMENT_MAX_LENGTH_SHARE,
     }
 
 

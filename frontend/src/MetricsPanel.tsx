@@ -73,15 +73,23 @@ export function MetricsPanel({
       <>
         <div className="m-group">
           <div className="m-group-head">люди</div>
+          <div className="m-group-note">сколько жителей города это затрагивает</div>
           <Delta label="получат доступ" value={result ? result.gained : null} kind="gain" />
           <Delta label="потеряют" value={result ? -result.lost : null} kind="loss" />
           <Pair
             label="в пешей доступности"
+            hint="Живут не дальше 500 м пешком по улицам до остановки, которую обслуживает хоть один маршрут."
             before={result ? result.pnt500_before : null}
             after={walkNow}
             format={people}
           />
-          <Pair label="в доступе к частой" before={null} after={frequentNow} format={people} />
+          <Pair
+            label="в доступе к частой"
+            hint="Из них те, у кого ближайшая остановка обслуживается маршрутом с интервалом чаще 15 минут."
+            before={null}
+            after={frequentNow}
+            format={people}
+          />
         </div>
 
         <div className="m-group">
@@ -89,6 +97,7 @@ export function MetricsPanel({
             сеть
             {routeNum && <span className="shield num">{routeNum}</span>}
           </div>
+          <div className="m-group-note">во что это обходится перевозчику</div>
 
           {affected.length === 0 ? (
             <NetworkRows
@@ -194,11 +203,46 @@ function NetworkRows(props: {
 }): React.JSX.Element {
   return (
     <>
-      <Pair label="время оборота" before={props.cycleBefore} after={props.cycleAfter} format={duration} />
-      <Pair label="требуется машин" before={props.needBefore} after={props.needAfter} format={(v) => int(v)} />
-      <Pair label="есть на линии" before={null} after={props.onLine} format={(v) => int(v)} />
-      <Pair label="интервал" before={props.headwayBefore} after={props.headwayAfter} format={(v) => minutes(v)} />
-      <Pair label="время в пути" before={props.oneWayBefore} after={props.oneWayAfter} format={duration} />
+      <Pair
+        label="время оборота"
+        hint="Круг целиком: туда, обратно и отстой на конечной. Считается по трафику за выбранный час — в карточке маршрута рядом стоит время оборота по реестру, оно от часа не зависит."
+        before={props.cycleBefore}
+        after={props.cycleAfter}
+        format={duration}
+      />
+      <Pair
+        label="требуется машин"
+        hint="Сколько бортов нужно, чтобы держать этот интервал: время оборота, делённое на интервал."
+        before={props.needBefore}
+        after={props.needAfter}
+        format={(v) => int(v)}
+      />
+      <Pair
+        label="бортов по оплатам"
+        hint="Уникальные номера машин, у которых в этот час прошла хотя бы одна оплата проезда. Борт без оплат в этот час в данные не попадает, поэтому число — нижняя граница, а не парк на линии."
+        before={null}
+        after={props.onLine}
+        format={(v) => int(v)}
+      />
+      <Pair
+        label="интервал"
+        hint="Плановый интервал маршрута; при правке расписания — тот, который задали."
+        before={props.headwayBefore}
+        after={props.headwayAfter}
+        format={(v) => minutes(v)}
+      />
+      <Pair
+        label="время в пути"
+        hint="От первой остановки до последней в одну сторону, по трафику за выбранный час."
+        before={props.oneWayBefore}
+        after={props.oneWayAfter}
+        format={duration}
+      />
+      {props.needAfter != null && props.onLine != null && props.needAfter > props.onLine && (
+        <div className="m-note">
+          требуется больше, чем видно по оплатам: борта без оплат в этот час в данных не видны
+        </div>
+      )}
     </>
   )
 }
@@ -206,11 +250,13 @@ function NetworkRows(props: {
 /** Строка «было → стало». Совпало или нечего сравнивать — одно значение, глухо. */
 function Pair({
   label,
+  hint,
   before,
   after,
   format,
 }: {
   label: string
+  hint?: string
   before: number | null
   after: number | null
   format: (value: number) => string
@@ -218,7 +264,15 @@ function Pair({
   const changed = before != null && after != null && Math.abs(before - after) > 1e-6
   return (
     <div className={`m-row${changed ? '' : ' is-same'}`}>
-      <span className="m-label">{label}</span>
+      <span className="m-label">
+        {hint ? (
+          <span className="hinted" title={hint}>
+            {label}
+          </span>
+        ) : (
+          label
+        )}
+      </span>
       <span className="m-val num">
         {changed && (
           <>

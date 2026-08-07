@@ -71,6 +71,8 @@ export interface MapViewProps {
   warnings: WarningPoint[]
   onWarnHover: (info: { messages: string[]; x: number; y: number } | null) => void
   onHexHover: (info: HexHover | null) => void
+  /** Клик по слою населения: точка, по которой считается ячейка H3. */
+  onHexClick: (at: LngLat) => void
   onSelectRoute: (routeNum: string, direction: Direction) => void
   onSelectStop: (stopId: string | null) => void
   onClearSelection: () => void
@@ -241,7 +243,9 @@ export function MapView(props: MapViewProps): React.JSX.Element {
       const reportHex = (e: MapMouseEvent) => {
         if (!latest.current.showHexes) return latest.current.onHexHover(null)
         // берём и заливку, и контуры: у непокрытых ячеек заливки нет
-        const layers = [HEX_LYR.fill, HEX_LYR.uncovered, HEX_LYR.frequent].filter((l) => map.getLayer(l))
+        const layers = [HEX_LYR.fill, HEX_LYR.uncovered, HEX_LYR.frequent].filter((l) =>
+          map.getLayer(l),
+        )
         const hex = map.queryRenderedFeatures(e.point, { layers })[0]
         if (!hex) return latest.current.onHexHover(null)
         latest.current.onHexHover({
@@ -432,6 +436,17 @@ export function MapView(props: MapViewProps): React.JSX.Element {
 
         const hit = pickAt(e.point)
         if (!hit) {
+          // §7 — клик по ячейке слоя населения открывает её карточку.
+          //
+          // Ячейка ищется по координате, а не по отрисованным слоям: у
+          // непокрытых ячеек заливки нет по требованию §7, есть только контур,
+          // и `queryRenderedFeatures` в середине такой ячейки не попадает
+          // никуда. То есть кликнуть было нельзя ровно по дырам покрытия —
+          // по тем самым, ради которых карточка и нужна.
+          if (latest.current.showHexes) {
+            latest.current.onHexClick([e.lngLat.lng, e.lngLat.lat])
+            return
+          }
           latest.current.onClearSelection()
           return
         }

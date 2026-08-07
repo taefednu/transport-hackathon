@@ -304,15 +304,24 @@ def run(store: Store, weekday: str, hour: int, ops: list[dict]) -> dict:
             store, route_num, direction, weekday, first, float(headway),
             params["n_vehicles"], route.get(f"work_end_{weekday}"),
         )
+        # Набор полей тот же, что у правки цепочки (`_schedule_cost`): интерфейс
+        # показывает одну и ту же таблицу «было → стало» независимо от того,
+        # чем правку сделали. Оба расписания уже посчитаны выше, брать неоткуда
+        # только «есть на линии» — это факт из данных, а не результат расчёта.
         affected.append(
             {
                 "route_num": route_num,
                 "direction": direction,
                 "headway_before": route.get("planned_headway_min"),
                 "headway_after": headway,
+                "one_way_before_min": before.get("one_way_min"),
+                "one_way_after_min": after_sched.get("one_way_min"),
                 "cycle_time_before": before.get("cycle_time_min"),
                 "cycle_time_after": after_sched.get("cycle_time_min"),
+                "required_vehicles_before": before.get("required_vehicles"),
                 "required_vehicles_after": after_sched.get("required_vehicles"),
+                "n_vehicles": params["n_vehicles"] or before.get("required_vehicles"),
+                "segments_at_city_speed": after_sched.get("segments_at_city_speed"),
             }
         )
         warnings.extend(validation.schedule_warnings(after_sched, route, weekday))

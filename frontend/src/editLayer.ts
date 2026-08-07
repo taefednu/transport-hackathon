@@ -21,6 +21,7 @@ export const EDIT_LYR = {
   changed: 'edit-changed-line',
   draft: 'edit-draft-line',
   ghost: 'edit-ghost-point',
+  tailHalo: 'edit-tail-halo',
   handles: 'edit-handle-points',
   ghostInsert: 'edit-ghost-insert',
 } as const
@@ -30,6 +31,8 @@ export interface HandlePoint {
   seq: number
   /** Хвостовая ручка: только за неё можно тянуть — ядро продлевает с конца. */
   tail: boolean
+  /** Головная: тоже конец трассы, но неподвижный — с головы ядро не продлевает. */
+  head: boolean
   coord: LngLat
 }
 
@@ -93,7 +96,27 @@ export function addEditLayers(map: MlMap): void {
     },
   })
 
-  // §8.1 — ручки: концевая 10 px, промежуточные 7 px, под курсором крупнее
+  // §8.1 — ручки трёх видов. Тянуть можно только за хвост, и это должно быть
+  // видно до первой попытки: хвост крупный и с широким кольцом, голова —
+  // такой же конец трассы, но закрашенный наглухо (ядро с головы не продлевает),
+  // промежуточные — мелкие точки. Ореол под хвостом добавляет ему веса.
+  map.addLayer({
+    id: EDIT_LYR.tailHalo,
+    type: 'circle',
+    source: EDIT_SRC.handles,
+    filter: ['get', 'tail'],
+    paint: {
+      'circle-radius': ['case', ['boolean', ['feature-state', 'hover'], false], 14, 11.5],
+      // Кольцо-мишень, а не заливка: заливка тем же тоном при малой альфе
+      // над светлой подложкой почти не отличается от неё.
+      'circle-color': C.selected,
+      'circle-opacity': 0.1,
+      'circle-stroke-color': C.selected,
+      'circle-stroke-width': 1.5,
+      'circle-stroke-opacity': ['case', ['boolean', ['feature-state', 'hover'], false], 0.75, 0.45],
+    },
+  })
+
   map.addLayer({
     id: EDIT_LYR.handles,
     type: 'circle',
@@ -101,18 +124,22 @@ export function addEditLayers(map: MlMap): void {
     paint: {
       'circle-radius': [
         'case',
-        ['boolean', ['feature-state', 'hover'], false],
-        ['case', ['get', 'tail'], 6, 4.5],
-        ['case', ['get', 'tail'], 5, 3.5],
+        ['get', 'tail'],
+        ['case', ['boolean', ['feature-state', 'hover'], false], 8, 6.5],
+        ['get', 'head'],
+        5,
+        ['case', ['boolean', ['feature-state', 'hover'], false], 4.5, 3.5],
       ],
       'circle-color': [
         'case',
+        ['get', 'head'],
+        C.selected,
         ['boolean', ['feature-state', 'hover'], false],
         C.selected,
         ['case', ['boolean', ['feature-state', 'picked'], false], C.selected, '#FFFFFF'],
       ],
       'circle-stroke-color': C.selected,
-      'circle-stroke-width': 2,
+      'circle-stroke-width': ['case', ['get', 'tail'], 3, 2],
     },
   })
 }
@@ -126,7 +153,7 @@ export function setHandles(map: MlMap, points: HandlePoint[]): void {
       type: 'Feature',
       id: p.seq,
       geometry: { type: 'Point', coordinates: p.coord },
-      properties: { stop_id: p.stopId, seq: p.seq, tail: p.tail },
+      properties: { stop_id: p.stopId, seq: p.seq, tail: p.tail, head: p.head },
     })),
   })
 }

@@ -15,6 +15,7 @@ from app.config import (
     MAX_DUPLICATION_WARNINGS,
     MAX_ROUTE_LENGTH_KM,
     MIN_STOP_SPACING_M,
+    SAME_POINT_SPACING_M,
 )
 from app.store import Store
 
@@ -97,11 +98,26 @@ def stop_spacing_warnings(store: Store, route_num: str, direction: str) -> list[
     gaps = np.hypot(np.diff(x), np.diff(y))
     out = []
     for i, gap in enumerate(gaps):
-        if gap < MIN_STOP_SPACING_M:
+        if gap < SAME_POINT_SPACING_M:
+            # Ноль метров — не решение планировщика и не сбой счёта: в OSM
+            # платформа и место посадки размечены разными узлами с одной
+            # координатой. Формулировка говорит про данные, а не про ошибку.
+            out.append(
+                _warn(
+                    "stops_same_point",
+                    "Два узла одного остановочного пункта: в OSM платформа "
+                    "и место посадки размечены отдельно, координата у них одна",
+                    "info",
+                    route_num=route_num,
+                    seq=i + 1,
+                    stop_id=seq["stop_id"][i + 1],
+                )
+            )
+        elif gap < MIN_STOP_SPACING_M:
             out.append(
                 _warn(
                     "stops_too_close",
-                    f"Остановка в {gap:.0f} м от предыдущей",
+                    f"Остановки в {gap:.0f} м друг от друга — ближе {MIN_STOP_SPACING_M:.0f} м",
                     "info",
                     route_num=route_num,
                     seq=i + 1,

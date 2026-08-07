@@ -22,12 +22,27 @@ export function Card({ title, subtitle, onClose, children }: CardProps): React.J
   )
 }
 
-export function Rows({ items }: { items: [string, React.ReactNode][] }): React.JSX.Element {
+/**
+ * Строки «подпись — значение». Третьим элементом можно дать пояснение: оно
+ * появляется при наведении, а подпись получает пунктир — иначе о подсказке
+ * никто не узнает.
+ */
+export type Row = [string, React.ReactNode] | [string, React.ReactNode, string]
+
+export function Rows({ items }: { items: Row[] }): React.JSX.Element {
   return (
     <dl className="rows">
-      {items.map(([label, value]) => (
+      {items.map(([label, value, hint]) => (
         <div className="row" key={label}>
-          <dt>{label}</dt>
+          <dt>
+            {hint ? (
+              <span className="hinted" title={hint}>
+                {label}
+              </span>
+            ) : (
+              label
+            )}
+          </dt>
           <dd className="num">{value}</dd>
         </div>
       ))}

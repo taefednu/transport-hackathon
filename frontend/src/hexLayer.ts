@@ -3,18 +3,29 @@
  * берутся у самой h3, а не рисуются похожими шестиугольниками: приближение
  * дало бы щели и нахлёсты на стыках, то есть враньё про геометрию.
  *
- * Кодировка проверена валидатором палитры, а не подобрана на глаз.
- * Существенное: на прозрачной заливке оттенок не работает. Спековые
- * `#2FA8A0` (покрыт) и `#E9A93C` (частая сеть), сведённые над фоном
- * `#F7F6F3` при alpha 0.3, дают ΔE 7.9 при нормальном зрении и 4.9 при
- * протанопии — при пороге 15. Два состояния становятся одним цветом.
+ * Кодировка проверена ΔE в OKLab, а не подобрана на глаз. Каналы разведены
+ * по задачам: заливка — сколько людей, контур — состояние ячейки.
  *
- * Поэтому каналы разведены по задачам:
- *   заливка — сколько людей (один тон, прозрачность по плотности);
- *   контур  — состояние (рисуется в полную силу и прозрачности не боится).
- * Пара контуров `#009B8A` (частая сеть) и `#C2563F` (не покрыт) проходит все
- * шесть проверок: ΔE 24.7 при нормальном зрении, 10.2 при дейтеранопии,
- * контраст обоих к фону выше 3:1.
+ * Шкала плотности пересчитана после перехода слоя населения на застройку.
+ * Прежнее распределение (медиана 1 395, максимум 40 673) было длиннохвостым,
+ * новое — плотное и с потолком: у покрытых ячеек p10 = 1 152, медиана 5 885,
+ * p85 = 8 566, максимум 15 918. Прежняя шкала считалась по всем ячейкам сразу,
+ * включая пустую периферию, поэтому медиана уезжала вниз, а весь город
+ * оказывался в верхней трети рампы: край-в-край ΔE 10.1 — города не видно.
+ *
+ * Две правки. Первая: якоря берутся по покрытым ячейкам — красим только их,
+ * по ним и надо считать. Вторая: плотность кодируется цветом, а не одной
+ * прозрачностью; один тон при малой альфе физически не даёт диапазона.
+ * Рампа `#CDE7E3 → #6FBFB6 → #00796C` при alpha 0.55 даёт край-в-край ΔE 22.9
+ * и 9.4 / 13.6 между соседними ступенями.
+ *
+ * Контур частой сети раньше был `#009B8A` — тот же тон, что заливка: ΔE 10.5
+ * при нормальном зрении и 8.2 при протанопии, то есть контур сливался с
+ * заливкой. Взят спековый `#E9A93C`: против заливки 18.7 / 13.2 / 17.8,
+ * против непокрытых `#C2563F` — 21.9 / 24.1 / 19.7 (норма / протан / дейтер),
+ * минимум по всем шести проверкам 13.2. Тёмный тил `#00524A` разводится с
+ * заливкой лучше, но при протанопии сходится с красным до 10.7 — отвергнут.
+ * Заливкой янтарный по-прежнему быть не может: при alpha 0.3 он давал 4.9.
  */
 
 import { cellToBoundary } from 'h3-js'
@@ -50,10 +61,32 @@ function polygon(h3: string, props: HexProps): Feature<Polygon, HexProps> {
 }
 
 export interface HexScale {
-  /** Медиана населения ячейки. */
+  /** 10-й процентиль по покрытым ячейкам: ниже него бледнее уже не красим. */
+  low: number
+  /** Медиана населения покрытой ячейки. */
   mid: number
   /** 85-й процентиль: выше него плотнее уже не красим. */
   top: number
+}
+
+/** Ступени плотности: бледная, средняя, плотная. Проверены ΔE, см. шапку. */
+export const DENSITY_RAMP = ['#CDE7E3', '#6FBFB6', '#00796C'] as const
+/** Прозрачность заливки: одна на всю рампу, диапазон держит цвет. */
+const FILL_ALPHA = 0.55
+
+/**
+ * Якоря шкалы — по покрытым ячейкам: заливка есть только у них, и считать
+ * шкалу по всему городу вместе с пустой периферией значит занижать медиану.
+ */
+export function hexScaleOf(hexes: BaselineHex[]): HexScale {
+  const sorted = hexes
+    .filter((h) => h.covered)
+    .map((h) => h.pop)
+    .sort((a, b) => a - b)
+  const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))] || 1
+  const low = at(0.1)
+  const mid = Math.max(at(0.5), low + 1)
+  return { low, mid, top: Math.max(at(0.85), mid + 1) }
 }
 
 export function buildHexes(hexes: BaselineHex[], holes: Hole[]): {
@@ -72,33 +105,27 @@ export function buildHexes(hexes: BaselineHex[], holes: Hole[]): {
     }),
   )
 
-  // Хвост распределения длинный: максимум (40 673) в тридцать раз больше
-  // медианы (1 395), и шкала по максимуму красит весь город одинаково бледным.
-  const sorted = hexes.map((h) => h.pop).sort((a, b) => a - b)
-  const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))] || 1
-
-  return {
-    cells: { type: 'FeatureCollection', features },
-    scale: { mid: at(0.5), top: Math.max(at(0.85), at(0.5) + 1) },
-  }
+  return { cells: { type: 'FeatureCollection', features }, scale: hexScaleOf(hexes) }
 }
 
-/**
- * Прозрачность по плотности. Слой лежит под маршрутами и перекрывать сеть
- * не должен, поэтому верх шкалы низкий — плотнее 0.22 заливка не становится.
- */
-function fillOpacity(scale: HexScale, factor = 1): ExpressionSpecification {
+/** Цвет по плотности: три ступени рампы на трёх якорях распределения. */
+function fillColor(scale: HexScale): ExpressionSpecification {
   return [
     'interpolate',
     ['linear'],
     ['get', 'pop'],
-    0,
-    0.06 * factor,
+    scale.low,
+    DENSITY_RAMP[0],
     scale.mid,
-    0.18 * factor,
+    DENSITY_RAMP[1],
     scale.top,
-    0.3 * factor,
+    DENSITY_RAMP[2],
   ]
+}
+
+/** Прозрачность одна на всю рампу: диапазон держит цвет, а не альфа. */
+function fillOpacity(factor = 1): number {
+  return FILL_ALPHA * factor
 }
 
 export function addHexLayers(
@@ -119,7 +146,7 @@ export function addHexLayers(
       source: HEX_SRC.cells,
       filter: ['get', 'covered'],
       layout: { visibility: 'none' },
-      paint: { 'fill-color': C.covered, 'fill-opacity': fillOpacity(scale) },
+      paint: { 'fill-color': fillColor(scale), 'fill-opacity': fillOpacity() },
     },
     beforeId,
   )
@@ -145,7 +172,7 @@ export function addHexLayers(
       source: HEX_SRC.cells,
       filter: ['get', 'frequent'],
       layout: { visibility: 'none', 'line-join': 'round' },
-      paint: { 'line-color': C.covered, 'line-width': 0.9, 'line-opacity': 0.5 },
+      paint: { 'line-color': C.frequent, 'line-width': 1.1, 'line-opacity': 0.85 },
     },
     beforeId,
   )
@@ -192,8 +219,12 @@ export function addHexLayers(
   )
 }
 
-/** Шкалу запоминаем: она входит в выражение прозрачности при каждом пересчёте. */
-let hexScale: HexScale = { mid: 1, top: 2 }
+/** Шкалу запоминаем: она нужна и легенде, и пересчёту при приглушении. */
+let hexScale: HexScale = { low: 1, mid: 2, top: 3 }
+
+export function currentHexScale(): HexScale {
+  return hexScale
+}
 
 export function setHexVisibility(map: MlMap, showHexes: boolean, showHoles: boolean, dim: boolean): void {
   const on = showHexes ? 'visible' : 'none'
@@ -208,10 +239,10 @@ export function setHexVisibility(map: MlMap, showHexes: boolean, showHoles: bool
   // чтобы не спорить с линией
   const factor = dim ? O.hexDimmed / 0.35 : 1
   if (map.getLayer(HEX_LYR.fill)) {
-    map.setPaintProperty(HEX_LYR.fill, 'fill-opacity', fillOpacity(hexScale, factor))
+    map.setPaintProperty(HEX_LYR.fill, 'fill-opacity', fillOpacity(factor))
   }
   if (map.getLayer(HEX_LYR.frequent)) {
-    map.setPaintProperty(HEX_LYR.frequent, 'line-opacity', dim ? 0.22 : 0.5)
+    map.setPaintProperty(HEX_LYR.frequent, 'line-opacity', dim ? 0.38 : 0.85)
   }
   if (map.getLayer(HEX_LYR.uncovered)) {
     map.setPaintProperty(HEX_LYR.uncovered, 'line-opacity', dim ? 0.28 : 0.5)

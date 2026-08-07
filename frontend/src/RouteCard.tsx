@@ -1,8 +1,11 @@
 /** Карточка маршрута (§12). Показывает только то, что реально есть в данных. */
 
-import { API_BASE, type Direction, type RouteSummary } from './api'
+import { API_BASE, type Direction, type ExtensionOption, type RouteSummary } from './api'
 import { Card, Caveat, Rows } from './Card'
 import { duration, hourLabel, km, minutes, plural } from './format'
+import { NoOptions, OptionsBlock } from './OptionsBlock'
+import type { Loaded } from './useOptions'
+import type { RouteOptions } from './api'
 
 /** Столько разрывов ядро считает границей «неполной трассы». */
 const INCOMPLETE_GEOMETRY_GAPS = 3
@@ -23,6 +26,10 @@ export interface RouteCardProps {
   tailIsStraight: boolean
   /** §5 — сколько бортов нарисовано на карте и почему их может не быть. */
   buses: { count: number; reason: string | null }
+  /** Варианты продления из перебора ядра — без модели. */
+  options: Loaded<RouteOptions>
+  appliedOptions: Set<string>
+  onApplyOption: (option: ExtensionOption) => void
   onDirection: (direction: Direction) => void
   onSelectStop: (stopId: string) => void
   onEdit: () => void
@@ -41,6 +48,9 @@ export function RouteCard({
   edited,
   tailIsStraight,
   buses,
+  options,
+  appliedOptions,
+  onApplyOption,
   onDirection,
   onSelectStop,
   onEdit,
@@ -94,6 +104,28 @@ export function RouteCard({
     >
       {error && <Caveat>маршрут не отдался: {error}</Caveat>}
 
+      {/* Два главных действия — наверху карточки и заметные. Внизу, среди
+          цепочки остановок и оговорок, их просто не находили. */}
+      <div className="card-actions card-actions-primary">
+        <button
+          className="btn btn-primary"
+          aria-pressed={editing}
+          disabled={!detail || detail.stops.length === 0}
+          title="править трассу: продлить, обрезать, вставить или убрать остановку (E)"
+          onClick={onEdit}
+        >
+          {editing ? 'закончить правку' : 'редактировать маршрут'}
+        </button>
+        <button
+          className="btn btn-primary"
+          disabled={!schedule?.available}
+          title="первый выезд и интервал: сколько машин потребует такое расписание"
+          onClick={onSchedule}
+        >
+          расписание
+        </button>
+      </div>
+
       <Rows
         items={[
           [
@@ -110,9 +142,17 @@ export function RouteCard({
           [`посадок в ${hourLabel(hour)}:00`, atHour?.n_boardings ?? '—'],
           [
             'бортов на карте',
-            buses.reason ? '—' : `${buses.count} · расчёт по интервалу`,
+            buses.reason ? '—' : `${buses.count} · расчёт`,
+            'Значки машин расставлены расчётом: борта разложены по трассе через фактический интервал ' +
+              'и время хода за этот час. Это не GPS — где машина сейчас, мы не знаем.',
           ],
-          ['время оборота по реестру', duration(schedule?.available ? schedule.cycle_time_min : null)],
+          [
+            'время оборота по реестру',
+            duration(schedule?.available ? schedule.cycle_time_min : null),
+            'Круг «туда, обратно и отстой» по плановому интервалу из реестра. ' +
+              'В блоке показателей справа то же время считается заново по трафику за выбранный час — ' +
+              'и по правкам сценария, если они есть, поэтому числа расходятся.',
+          ],
           [
             'режим работы',
             detail?.work_start && detail.work_end ? `${detail.work_start}–${detail.work_end}` : '—',
@@ -136,6 +176,29 @@ export function RouteCard({
         </Caveat>
       )}
       {schedule && !schedule.available && schedule.reason && <Caveat>{schedule.reason}</Caveat>}
+
+      {/* Перебор ядра: до какой остановки дотянуть и какой ценой. Считается
+          без модели, применяется человеком. */}
+      <div className="card-section">что можно сделать</div>
+      {options.loading && <div className="muted">ядро перебирает остановки…</div>}
+      {options.error && <Caveat>подбор не сделан: {options.error}</Caveat>}
+      {options.data &&
+        (options.data.options.length > 0 ? (
+          <OptionsBlock
+            options={options.data.options}
+            showRoute={false}
+            applied={appliedOptions}
+            onApply={onApplyOption}
+          />
+        ) : (
+          <NoOptions
+            checked={options.data.candidates_checked}
+            offHousing={options.data.candidates_off_housing}
+            radiusM={options.data.housing_radius_m}
+            minBuildings={options.data.min_housing_buildings}
+            maxExtra={options.data.max_extra_vehicles}
+          />
+        ))}
 
       {rows.length > 0 && (
         <>
@@ -214,17 +277,6 @@ export function RouteCard({
       )}
 
       <div className="card-actions">
-        <button
-          className="btn"
-          aria-pressed={editing}
-          disabled={!detail || detail.stops.length === 0}
-          onClick={onEdit}
-        >
-          {editing ? 'закончить правку' : 'редактировать'}
-        </button>
-        <button className="btn" disabled={!schedule?.available} onClick={onSchedule}>
-          расписание
-        </button>
         <a
           className="btn"
           href={`${API_BASE}/api/export/route?route_num=${encodeURIComponent(routeNum)}&direction=${direction}`}
