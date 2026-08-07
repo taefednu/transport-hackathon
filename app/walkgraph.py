@@ -50,6 +50,42 @@ class WalkGraph:
                     heapq.heappush(heap, (nd, nxt))
         return dist
 
+    def nearest_source(
+        self, sources: np.ndarray, limit_m: float | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Для каждой вершины — расстояние до ближайшего источника и какой это источник.
+
+        Один обход от всех остановок сразу: так расстояние «до ближайшей остановки»
+        получается по сети для всего города, а не только внутри зоны 500 м.
+        """
+        n = self.n_nodes
+        dist = np.full(n, np.inf, dtype=np.float64)
+        owner = np.full(n, -1, dtype=np.int32)
+        heap: list[tuple[float, int, int]] = []
+        for src_index, node in enumerate(sources):
+            node = int(node)
+            if 0.0 < dist[node]:
+                dist[node] = 0.0
+                owner[node] = src_index
+                heap.append((0.0, node, src_index))
+        heapq.heapify(heap)
+
+        while heap:
+            d, node, src_index = heapq.heappop(heap)
+            if d > dist[node]:
+                continue
+            start, end = self.indptr[node], self.indptr[node + 1]
+            for k in range(start, end):
+                nxt = int(self.indices[k])
+                nd = d + float(self.weights[k])
+                if limit_m is not None and nd > limit_m:
+                    continue
+                if nd < dist[nxt]:
+                    dist[nxt] = nd
+                    owner[nxt] = src_index
+                    heapq.heappush(heap, (nd, nxt, src_index))
+        return dist, owner
+
     # pickle здесь безопасен: файл — артефакт нашего же пайплайна из data/build,
     # он не приходит извне и не принимается от пользователя.
     def save(self, path: Path) -> None:

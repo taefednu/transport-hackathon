@@ -25,6 +25,7 @@ from scipy.spatial import cKDTree
 from app.config import (
     BOUNDARY_GEOJSON,
     H3_RESOLUTION,
+    HEX_ACCESS_PARQUET,
     OSM_PBF,
     STOP_HEXES_PARQUET,
     STOPS_PARQUET,
@@ -143,6 +144,41 @@ def main() -> None:
 
     print(f"пар (остановка, гексагон): {stop_hexes.height} → {STOP_HEXES_PARQUET}")
     print(f"уникальных гексагонов в зонах доступности: {stop_hexes['h3_id'].n_unique()}")
+
+    # расстояние по сети до ближайшей остановки для каждой вершины графа:
+    # без него «время до остановки» меряется до края гексагона и вырождается в ноль
+    node_dist, node_owner = graph.nearest_source(snap_idx)
+    reached = np.isfinite(node_dist)
+    print(
+        f"вершин с доступом к сети остановок: {reached.sum()} из {graph.n_nodes} "
+        f"({reached.sum() / graph.n_nodes:.1%})"
+    )
+
+    node_cells = [
+        h3.latlng_to_cell(float(la), float(lo), H3_RESOLUTION) for la, lo in zip(lat, lon)
+    ]
+    stop_ids = stops["stop_id"].to_numpy()
+    access = (
+        pl.DataFrame(
+            {
+                "h3_id": node_cells,
+                "walk_m": node_dist,
+                "nearest_stop_id": np.where(
+                    node_owner >= 0, stop_ids[np.clip(node_owner, 0, None)], None
+                ),
+            }
+        )
+        .filter(pl.col("walk_m").is_finite())
+        .group_by("h3_id")
+        .agg(
+            pl.col("walk_m").median().alias("walk_m_median"),
+            pl.col("walk_m").min().alias("walk_m_min"),
+            pl.col("nearest_stop_id").sort_by("walk_m").first().alias("nearest_stop_id"),
+            pl.len().alias("n_nodes"),
+        )
+    )
+    access.write_parquet(HEX_ACCESS_PARQUET)
+    print(f"гексагонов с расстоянием по сети: {access.height} → {HEX_ACCESS_PARQUET}")
     print(f"время: {time.time() - t0:.1f} с")
 
 
