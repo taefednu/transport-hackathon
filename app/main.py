@@ -243,3 +243,25 @@ def post_scenario(body: dict) -> dict:
         return scenario.run(store(), weekday, hour, ops)
     except scenario.ScenarioError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/holes")
+def holes(limit: int = Query(default=200, ge=1, le=2000)) -> dict:
+    st = store()
+    if st.holes is None:
+        raise HTTPException(503, "нет data/build/holes.parquet (шаг 9 пайплайна)")
+    top = st.holes.head(limit)
+    return {
+        "count": st.holes.height,
+        "people_total": float(st.holes["population"].sum()),
+        "holes": top.to_dicts(),
+    }
+
+
+@app.get("/api/segments/parallel")
+def segments_parallel(min_routes: int = Query(default=1, ge=1)) -> dict:
+    st = store()
+    if st.segment_routes is None:
+        raise HTTPException(503, "нет data/build/segment_routes.parquet (шаг 8 пайплайна)")
+    df = st.segment_routes.filter(pl.col("n") >= min_routes)
+    return {"count": df.height, "segments": df.to_dicts()}
