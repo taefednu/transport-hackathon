@@ -42,6 +42,9 @@ def main() -> None:
 
     trips = (
         lazy.filter(pl.col("transport") == "bus")
+        # берём только четыре нужные колонки: остальные 12 в память тянуть незачем,
+        # на 4.76 млн строк это разница между 0.5 ГБ и падением по памяти
+        .select("route", "terminal_date", "reg_num")
         .with_columns(
             pl.col("route").str.extract(ROUTE_PATTERN, 1).alias("route_num"),
             pl.col("terminal_date").str.to_datetime("%Y-%m-%d %H:%M:%S", strict=False).alias("ts"),
@@ -51,6 +54,7 @@ def main() -> None:
             pl.col("ts").dt.date().cast(pl.String).alias("date"),
             pl.col("ts").dt.hour().alias("hour"),
         )
+        .drop("route", "terminal_date")
         .sort(["route_num", "reg_num", "ts"])
         .with_columns(
             # новый рейс начинается там, где борт замолчал дольше TRIP_GAP_MIN

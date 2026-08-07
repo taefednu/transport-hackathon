@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import csv
+import io
 from contextlib import asynccontextmanager
 
 import polars as pl
 import shapely
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 
-from app import config, coverage, scenario, schedule, validation
+from app import config, coverage, scenario, schedule, search as search_mod, validation
 from app.store import Store, load
 
 STATE: dict[str, Store] = {}
@@ -17,6 +19,7 @@ STATE: dict[str, Store] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     STATE["store"] = load()
+    STATE["search_index"] = search_mod.build_index(STATE["store"])
     yield
     STATE.clear()
 
@@ -265,3 +268,86 @@ def segments_parallel(min_routes: int = Query(default=1, ge=1)) -> dict:
         raise HTTPException(503, "нет data/build/segment_routes.parquet (шаг 8 пайплайна)")
     df = st.segment_routes.filter(pl.col("n") >= min_routes)
     return {"count": df.height, "segments": df.to_dicts()}
+
+
+@app.get("/api/search")
+def search(q: str = Query(min_length=1), limit: int = Query(default=10, ge=1, le=50)) -> dict:
+    return search_mod.search(STATE["search_index"], q, limit)
+
+
+@app.get("/api/export/schedule")
+def export_schedule(
+    route_num: str,
+    direction: str = Query(default="fwd"),
+    weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
+    first_departure: str = Query(default=None),
+    headway_min: float = Query(default=None, gt=0),
+) -> Response:
+    payload = route_schedule(route_num, direction, weekday, first_departure, headway_min, None)
+    if not payload.get("available"):
+        raise HTTPException(422, payload.get("reason", "расписание недоступно"))
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["seq", "stop_id", "name", "trip_index", "arrival"])
+    for stop in payload["stops"]:
+        for trip_index, arrival in enumerate(stop["arrivals"]):
+            writer.writerow([stop["seq"], stop["stop_id"], stop["name"], trip_index, arrival])
+
+    filename = f"schedule_{route_num}_{direction}_{weekday}.csv"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/export/route")
+def export_route(route_num: str, direction: str = Query(default="fwd")) -> dict:
+    st = store()
+    if st.routes is None:
+        raise HTTPException(503, "нет data/build/routes.parquet (шаг 4 пайплайна)")
+    row = st.routes.filter(
+        (pl.col("route_num") == route_num) & (pl.col("direction") == direction)
+    )
+    if row.is_empty():
+        raise HTTPException(404, f"маршрут {route_num} направление {direction} не найден")
+    route = row.to_dicts()[0]
+
+    features = []
+    if route.get("geometry_wkt"):
+        line = shapely.from_wkt(route["geometry_wkt"])
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": [list(c) for c in line.coords]},
+                "properties": {
+                    "route_num": route_num,
+                    "direction": direction,
+                    "name": route["name"],
+                    "quality": route["quality"],
+                    "length_km": route["length_km"],
+                },
+            }
+        )
+    if st.route_stops is not None:
+        seq = (
+            st.route_stops.filter(
+                (pl.col("route_num") == route_num) & (pl.col("direction") == direction)
+            )
+            .sort("seq")
+            .join(st.stops.select("stop_id", "name", "lat", "lon"), on="stop_id", how="left")
+        )
+        for stop in seq.iter_rows(named=True):
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [stop["lon"], stop["lat"]]},
+                    "properties": {
+                        "seq": stop["seq"],
+                        "stop_id": stop["stop_id"],
+                        "name": stop["name"],
+                    },
+                }
+            )
+    return {"type": "FeatureCollection", "features": features}
