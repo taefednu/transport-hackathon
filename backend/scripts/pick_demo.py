@@ -26,7 +26,7 @@ CANDIDATES_PER_ROUTE = 5
 MAX_LENGTH_SHARE = 0.25
 # больше двух дополнительных машин на защите не объяснить
 MAX_EXTRA_VEHICLES = 2
-TOP = 20
+TOP = 10
 
 
 def confidently_unserved(store) -> pl.DataFrame:
@@ -47,6 +47,10 @@ def main() -> None:
     store = load()
     index = {stop_id: i for i, stop_id in enumerate(store.stops["stop_id"].to_list())}
     names = dict(zip(store.stops["stop_id"].to_list(), store.stops["name"].to_list()))
+    # координаты цели продления: по ним конечную проверяют по спутнику
+    coords = {
+        r["stop_id"]: (r["lat"], r["lon"]) for r in store.stops.select("stop_id", "lat", "lon").to_dicts()
+    }
 
     candidates = confidently_unserved(store)
     candidate_ids = candidates["stop_id"].to_list()
@@ -114,6 +118,9 @@ def main() -> None:
                 {
                     "route": f"{route_num} ({direction})",
                     "stop": names.get(stop_id) or stop_id,
+                    "stop_id": stop_id,
+                    "lat": coords[stop_id][0],
+                    "lon": coords[stop_id][1],
                     "added_stops": affected["n_stops_after"] - affected["n_stops_before"],
                     "tail_km": tail_km,
                     "length_km": length_km,
@@ -135,18 +142,19 @@ def main() -> None:
     print(f"прогнано продлений: {tried}, не посчиталось: {failed}, прошло отбор: {len(rows)}\n")
 
     header = (
-        f"{'маршрут':>12} {'до остановки':<28} {'ост':>3} {'хвост':>7} "
-        f"{'+людей':>9} {'оборот, мин':>15} {'машин':>9} {'на машину':>11} {'медиана':>8}"
+        f"{'маршрут':>12} {'до остановки':<26} {'id':<12} {'координаты':<21} {'ост':>3} "
+        f"{'хвост':>7} {'+людей':>8} {'оборот, мин':>15} {'машин':>9} {'на машину':>11}"
     )
     print(header)
     print("-" * len(header))
     for row in rows[:TOP]:
         per = "в выпуск" if row["per_vehicle"] == float("inf") else f"{row['per_vehicle']:,.0f}"
         print(
-            f"{row['route']:>12} {row['stop'][:28]:<28} {row['added_stops']:>3} "
-            f"{row['tail_km']:>6.2f}к {row['gained']:>9,.0f} "
+            f"{row['route']:>12} {row['stop'][:26]:<26} {row['stop_id']:<12} "
+            f"{row['lat']:.5f}, {row['lon']:.5f}  {row['added_stops']:>3} "
+            f"{row['tail_km']:>6.2f}к {row['gained']:>8,.0f} "
             f"{row['cycle_before']:>6.1f}→{row['cycle_after']:<8.1f} "
-            f"{row['veh_before']:>3}→{row['veh_after']:<5} {per:>11} {row['city_share']:>7.0%}"
+            f"{row['veh_before']:>3}→{row['veh_after']:<5} {per:>11}"
         )
 
     if rows:
