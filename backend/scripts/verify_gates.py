@@ -236,11 +236,11 @@ def gate7(gain_stop_name: str) -> dict:
 
 def gate8(gain_result: dict) -> dict:
     """Объяснение результата: ни одного числа сверх входных данных."""
-    from app import explain as explain_mod
+    from app import config, explain as explain_mod
 
     payload = {
         "result": gain_result,
-        "sources": {"fallback_share": 0.089, "population_layer_date": "01.11.2023"},
+        "sources": {"fallback_share": 0.089, "population_layer_date": config.ACTIVE_POPULATION_DATE},
     }
     answer, ms = post_json("/api/explain", payload)
     extra = sorted(explain_mod.numbers_in(answer["text"]) - explain_mod.allowed_numbers(answer["facts"]))

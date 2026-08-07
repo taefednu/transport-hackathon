@@ -141,7 +141,7 @@ POPULATION_LAYER_DATE = "01.11.2023"
 # "buildings" — контрольная численность, разложенная по застройке OSM.
 # Kontur внутри города распределён неправдоподобно (facts.md §9), поэтому
 # альтернатива существует; переключение — только этой константой.
-POPULATION_SOURCE = os.environ.get("QATNOV_POPULATION_SOURCE", "kontur").strip().lower()
+POPULATION_SOURCE = os.environ.get("QATNOV_POPULATION_SOURCE", "buildings").strip().lower()
 ACTIVE_HEXES_PARQUET = (
     HEXES_BUILDINGS_PARQUET if POPULATION_SOURCE == "buildings" else HEXES_PARQUET
 )
@@ -153,6 +153,22 @@ POPULATION_CONTROL_DATE = "01.01.2026"
 # проставлен у 93% многоквартирных домов и лишь у 6% индивидуальных, причём
 # у крупных. Внутри корзины размеченное и неразмеченное здание сопоставимы.
 BUILDING_AREA_BINS_M2 = (80.0, 120.0, 180.0, 250.0, 400.0, 700.0, 1200.0, 3000.0)
+# чем меряется жилая ёмкость гексагона в слое по застройке:
+# "floor_area"  — сумма площади пола (пятно × этажность). От типа здания
+#                 не зависит, поэтому не ломается там, где многоэтажку
+#                 разметили как building=yes;
+# "two_weight"  — многоквартирные × вес + индивидуальные × 1. Проще для
+#                 объяснения, но расходится с первой на 45.5% населения.
+BUILDING_CAPACITY_MODEL = os.environ.get(
+    "QATNOV_BUILDING_CAPACITY_MODEL", "floor_area"
+).strip().lower()
+# дата, которую сервер обязан называть в оговорке об источниках. Она зависит
+# от активного слоя: у Kontur это дата среза, у раскладки по застройке — дата
+# контрольной численности. Подставлять дату Kontur под слой по застройке —
+# это заявление, которое не соответствует данным.
+ACTIVE_POPULATION_DATE = (
+    POPULATION_LAYER_DATE if POPULATION_SOURCE == "kontur" else POPULATION_CONTROL_DATE
+)
 
 # --- YandexGPT ----------------------------------------------------------
 # Yandex AI Studio, Foundation Models v1. Адрес и имена полей сверены с

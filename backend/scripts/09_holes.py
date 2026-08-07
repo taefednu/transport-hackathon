@@ -13,8 +13,8 @@ import _bootstrap  # noqa: F401
 import polars as pl
 
 from app.config import (
+    ACTIVE_HEXES_PARQUET,
     HEX_ACCESS_PARQUET,
-    HEXES_PARQUET,
     HOLES_PARQUET,
     STOP_HEXES_PARQUET,
     STOPS_PARQUET,
@@ -22,7 +22,9 @@ from app.config import (
 
 
 def main() -> None:
-    hexes = pl.read_parquet(HEXES_PARQUET)
+    # слой населения выбирается константой POPULATION_SOURCE: дыры обязаны
+    # считаться по тому же слою, что и метрики, иначе /api/holes расходится с /api/metrics
+    hexes = pl.read_parquet(ACTIVE_HEXES_PARQUET)
     stop_hexes = pl.read_parquet(STOP_HEXES_PARQUET)
     access = pl.read_parquet(HEX_ACCESS_PARQUET)
     stops = pl.read_parquet(STOPS_PARQUET)

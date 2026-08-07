@@ -226,14 +226,36 @@ def main() -> None:
     floor_layer = floor.with_columns(
         (pl.col("floor_area") / pl.col("floor_area").sum() * config.POPULATION_CONTROL).alias("population")
     ).join(buildings.select("h3_id", "lat", "lon"), on="h3_id", how="left")
-    check = floor_layer.join(
-        buildings.select("h3_id", pl.col("population").alias("двухвесовая")), on="h3_id", how="inner"
+
+    # Двухвесовая раскладка строится здесь заново, а не берётся из сохранённого
+    # слоя: слой хранит ту модель, которая выбрана константой. Если сравнивать
+    # с ним напрямую, при BUILDING_CAPACITY_MODEL=floor_area обе колонки станут
+    # одной и той же, корреляция выйдет 1.000, и проверка перестанет что-либо
+    # проверять, продолжая печатать «расхождений нет».
+    stats_by_klass = {
+        row["klass"]: row["floor_area"]
+        for row in typed.join(typical, on=["klass", "area_bin"], how="left")
+        .with_columns(pl.coalesce(pl.col("levels"), pl.col("levels_typical"), pl.lit(1.0)).alias("lv"))
+        .with_columns((pl.col("area_m2") * pl.col("lv")).alias("floor_area"))
+        .group_by("klass")
+        .agg(pl.col("floor_area").median())
+        .to_dicts()
+    }
+    weight = float(stats_by_klass["apartment"] / stats_by_klass["individual"])
+    two_weight_layer = (
+        buildings.select("h3_id", "apartments", "individual_buildings")
+        .with_columns(
+            (pl.col("apartments") * weight + pl.col("individual_buildings")).alias("capacity")
+        )
+        .with_columns(
+            (pl.col("capacity") / pl.col("capacity").sum() * config.POPULATION_CONTROL)
+            .alias("двухвесовая")
+        )
     )
-    scaled_two = rescale(buildings, config.POPULATION_CONTROL).select(
-        "h3_id", pl.col("population").alias("двухвесовая"))
     check = floor_layer.select("h3_id", pl.col("population").alias("по_площади_пола")).join(
-        scaled_two, on="h3_id", how="inner")
-    print(f"\nкорреляция «двухвесовая ↔ по площади пола»: "
+        two_weight_layer.select("h3_id", "двухвесовая"), on="h3_id", how="inner")
+    print(f"\nвес многоквартирного дома (пересчитан здесь): {weight:.2f}")
+    print(f"корреляция «двухвесовая ↔ по площади пола»: "
           f"{float(check.select(pl.corr('двухвесовая', 'по_площади_пола')).item()):.3f}")
     diff = check.with_columns(
         (pl.col("по_площади_пола") - pl.col("двухвесовая")).abs().alias("расхождение"))
@@ -247,8 +269,13 @@ def main() -> None:
 
     store.hexes = floor_layer.select("h3_id", "population", "lat", "lon")
     base_floor = coverage.baseline(store, WEEKDAY, HOUR)
-    print(f"\nPNT-500 по раскладке на площадь пола: {base_floor['pnt500']['share']:.1%} "
-          f"(двухвесовая — 94.6%, Kontur — 90.4%)")
+    store.hexes = two_weight_layer.select(
+        "h3_id", pl.col("двухвесовая").alias("population")
+    ).join(buildings.select("h3_id", "lat", "lon"), on="h3_id", how="left")
+    base_two = coverage.baseline(store, WEEKDAY, HOUR)
+    print(f"\nPNT-500 по трём раскладкам: Kontur {columns['Kontur\nсумма Kontur в границе']['PNT-500 доля']:.1%}, "
+          f"двухвесовая {base_two['pnt500']['share']:.1%}, "
+          f"по площади пола {base_floor['pnt500']['share']:.1%}")
 
     suspicious = joined.filter((pl.col("узлов_графа") >= 200) & (pl.col("зданий") <= 20))
     print(f"гексагонов с плотной уличной сетью (≥200 узлов) и почти без зданий (≤20): "

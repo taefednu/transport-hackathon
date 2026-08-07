@@ -7,26 +7,31 @@
 верна, поштучные значения по гексагонам — нет.
 
 Метод: население = контрольная численность × доля жилой ёмкости гексагона.
-Ёмкость = число многоквартирных домов × вес + число индивидуальных × 1.
-Вес не выдуман: он равен отношению медианной жилой площади (площадь пятна ×
-этажность) многоквартирного дома к индивидуальному. Этажность там, где её нет
-в OSM, восстанавливается по корзинам площади пятна, иначе медиана считалась бы
-по смещённой подвыборке: `building:levels` проставляют у крупных зданий.
+Чем меряется ёмкость — задаёт `config.BUILDING_CAPACITY_MODEL`:
 
-Абсолютный масштаб задаёт контрольная численность, поэтому калибровать нужно
-только одно число — отношение весов.
+* `floor_area` (по умолчанию) — сумма площади пола: пятно × этажность. Тип
+  здания не участвует, поэтому многоэтажка, размеченная `building=yes`, весит
+  как многоэтажка. Геометрия есть у 99.96% зданий, тег типа — нет.
+* `two_weight` — многоквартирные × вес + индивидуальные × 1, где вес равен
+  отношению медианной площади пола двух классов. Проще для объяснения, но
+  воспроизводит ошибки типизации: расхождение с `floor_area` — 45.5% населения
+  города при корреляции 0.662 (`scripts/compare_population_layers.py`).
 
-Ограничение метода измерено: раскладка по площади пола (то же, но без деления
-на классы) расходится с двухвесовой на 45% населения, потому что многоэтажки,
-размеченные как `building=yes`, получают вес обычного дома. Числа рядом —
-`scripts/compare_population_layers.py`.
+Этажность там, где её нет в OSM, восстанавливается по корзинам площади пятна:
+`building:levels` проставлен у 93% многоквартирных домов и лишь у 6%
+индивидуальных, причём на крупных, — медиана по размеченной подвыборке была бы
+смещена (164 м² по классу против 565 м² внутри подвыборки).
+
+Абсолютный масштаб задаёт контрольная численность, распределение — только
+относительные веса.
 
 Вход:  data/external/uzbekistan-latest.osm.pbf, data/build/tashkent_boundary.geojson
 Выход: data/build/hexes_buildings.parquet     — тот же формат, что hexes.parquet
        data/build/buildings.parquet           — сырьё для аудита метода
 
-Продукт не переключается сам: сервер читает config.ACTIVE_HEXES_PARQUET,
-которая выбирается константой QATNOV_POPULATION_SOURCE (kontur | buildings).
+Сервер читает config.ACTIVE_HEXES_PARQUET, которая выбирается константой
+QATNOV_POPULATION_SOURCE (kontur | buildings). После смены слоя пересчитать
+шаг 9: дыры считаются по тому же слою.
 
 Запуск: `.venv/bin/python scripts/03b_population_buildings.py`
 """
@@ -45,6 +50,7 @@ from shapely.prepared import prep
 from app.config import (
     BOUNDARY_GEOJSON,
     BUILDING_AREA_BINS_M2,
+    BUILDING_CAPACITY_MODEL,
     BUILDINGS_PARQUET,
     H3_RESOLUTION,
     HEXES_BUILDINGS_PARQUET,
@@ -220,9 +226,28 @@ def main() -> None:
         if column not in counts.columns:
             counts = counts.with_columns(pl.lit(0).alias(column))
 
-    counts = counts.with_columns(
-        (pl.col("apartment") * weight_apartment + pl.col("individual")).alias("capacity")
+    counts = counts.join(
+        residential.group_by("h3_id").agg(pl.col("floor_area").sum().alias("floor_area")),
+        on="h3_id",
+        how="left",
     )
+
+    if BUILDING_CAPACITY_MODEL == "floor_area":
+        # Ёмкость — сумма площади пола по зданиям гексагона. Тип здания здесь
+        # не участвует, поэтому многоэтажка, размеченная `building=yes`, весит
+        # как многоэтажка, а не как дом. Двухвесовая модель на этом ошибается:
+        # расхождение между моделями — 45.5% населения города.
+        counts = counts.with_columns(pl.col("floor_area").alias("capacity"))
+    elif BUILDING_CAPACITY_MODEL == "two_weight":
+        counts = counts.with_columns(
+            (pl.col("apartment") * weight_apartment + pl.col("individual")).alias("capacity")
+        )
+    else:
+        raise SystemExit(
+            f"неизвестная модель ёмкости: {BUILDING_CAPACITY_MODEL} "
+            "(ожидается floor_area или two_weight)"
+        )
+    print(f"модель ёмкости: {BUILDING_CAPACITY_MODEL}")
     total_capacity = float(counts["capacity"].sum())
     centroids = [h3.cell_to_latlng(c) for c in counts["h3_id"].to_list()]
 
@@ -239,7 +264,7 @@ def main() -> None:
         pl.col("individual").alias("individual_buildings"),
     ).select(
         "h3_id", "population", "population_full", "city_share", "lat", "lon",
-        "apartments", "individual_buildings", "capacity",
+        "apartments", "individual_buildings", "floor_area", "capacity",
     ).sort("population", descending=True)
 
     hexes.write_parquet(HEXES_BUILDINGS_PARQUET)
@@ -248,7 +273,8 @@ def main() -> None:
     print(f"сумма слоя: {hexes['population'].sum():,.0f}")
     print(f"записано: {HEXES_BUILDINGS_PARQUET}")
     print("\nверх списка:")
-    print(hexes.head(8).select("h3_id", "population", "apartments", "individual_buildings", "lat", "lon")
+    print(hexes.head(8).select("h3_id", "population", "apartments", "individual_buildings",
+                               pl.col("floor_area").round(0), "lat", "lon")
           .to_pandas().to_string(index=False))
 
 

@@ -61,7 +61,7 @@ def build_facts(store: Store, body: dict) -> dict:
         share_from = "данные сервера"
     population_date = sources.get("population_layer_date")
     if not population_date:
-        population_date = config.POPULATION_LAYER_DATE
+        population_date = config.ACTIVE_POPULATION_DATE
 
     changes: list[str] = []
     for route in result.get("affected_routes") or []:

@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 import polars as pl
 import shapely
 from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 from app import (
     config,
@@ -36,6 +37,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="QATNOV", lifespan=lifespan)
+
+# фронтенд ходит с другого порта: без этого браузер режет любой запрос к ядру
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(config.CORS_ORIGINS),
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
 
 
 def store() -> Store:
@@ -71,10 +80,22 @@ def meta() -> dict:
                 "detail": "локальный дамп Geofabrik uzbekistan-latest",
                 "license": "ODbL",
             },
+            # источник населения зависит от config.POPULATION_SOURCE: объявлять
+            # Kontur, когда сервер читает раскладку по застройке, нельзя
             {
                 "name": "Kontur Population",
-                "detail": "H3 r8, срез 01.11.2023",
+                "detail": f"H3 r8, срез {config.POPULATION_LAYER_DATE}",
                 "license": "CC BY",
+            }
+            if config.POPULATION_SOURCE == "kontur"
+            else {
+                "name": "Население по застройке OSM",
+                "detail": (
+                    f"численность Нацкомстата на {config.POPULATION_CONTROL_DATE} "
+                    f"({config.POPULATION_CONTROL:,.0f}), разложенная по зданиям; "
+                    f"модель ёмкости — {config.BUILDING_CAPACITY_MODEL}"
+                ),
+                "license": "ODbL (геометрия) + официальная статистика",
             },
         ],
         "not_built_yet": st.missing,
