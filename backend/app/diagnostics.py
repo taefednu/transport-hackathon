@@ -76,8 +76,16 @@ def _duplication_share(store: Store) -> dict[str, float]:
     return dict(zip(grouped["route_num"].to_list(), grouped["share"].to_list()))
 
 
-def _close_stops_share(store: Store) -> dict[str, float]:
-    """Доля перегонов маршрута короче MIN_STOP_SPACING_M."""
+def _close_stops_share(store: Store) -> dict[str, tuple]:
+    """Доля перегонов, где остановки стоят слишком близко друг к другу.
+
+    Перегоны короче SAME_POINT_SPACING_M сюда не входят. Это не две остановки
+    в паре метров, а один остановочный пункт: в OSM платформа и место посадки
+    размечены разными узлами с одной координатой. Таких пар 99 из 3 777, и
+    считать их решением планировщика нельзя — иначе маршрут попадает в список
+    проблемных за особенность чужой разметки. Их число возвращается отдельно,
+    чтобы объяснение могло назвать и его.
+    """
     if store.route_stops is None:
         return {}
     index = {stop_id: i for i, stop_id in enumerate(store.stops["stop_id"].to_list())}
@@ -99,14 +107,21 @@ def _close_stops_share(store: Store) -> dict[str, float]:
         .sqrt()
         .alias("gap_m")
     )
+    close = (pl.col("gap_m") >= config.SAME_POINT_SPACING_M) & (
+        pl.col("gap_m") < config.MIN_STOP_SPACING_M
+    )
     grouped = table.drop_nulls("gap_m").group_by("route_num").agg(
-        (pl.col("gap_m") < config.MIN_STOP_SPACING_M).mean().alias("share"),
-        (pl.col("gap_m") < config.MIN_STOP_SPACING_M).sum().alias("n"),
+        close.mean().alias("share"),
+        close.sum().alias("n"),
+        (pl.col("gap_m") < config.SAME_POINT_SPACING_M).sum().alias("n_same_point"),
     )
     return {
-        num: (share, int(n))
-        for num, share, n in zip(
-            grouped["route_num"].to_list(), grouped["share"].to_list(), grouped["n"].to_list()
+        num: (share, int(n), int(same))
+        for num, share, n, same in zip(
+            grouped["route_num"].to_list(),
+            grouped["share"].to_list(),
+            grouped["n"].to_list(),
+            grouped["n_same_point"].to_list(),
         )
     }
 
@@ -207,12 +222,16 @@ def compute(store: Store, weekday: str, hour: int) -> list[dict]:
             signs["stops_too_close"] = {
                 "share_of_segments_percent": round(float(close[0]) * 100, 1),
                 "n_segments": close[1],
+                "n_same_point": close[2],
                 "limit_m": config.MIN_STOP_SPACING_M,
                 "severity": float(close[0]),
             }
 
+        # Признак без веса в оценку не идёт: он наблюдение, а не претензия
+        # к маршруту. См. комментарий у config.ATTENTION_WEIGHTS.
         score = sum(
-            config.ATTENTION_WEIGHTS[name] * data["severity"] for name, data in signs.items()
+            config.ATTENTION_WEIGHTS.get(name, 0.0) * data["severity"]
+            for name, data in signs.items()
         )
         out.append(
             {
@@ -248,7 +267,7 @@ REASON_TEXT = {
     # не попадает, поэтому число — нижняя граница выпуска, а не сам выпуск.
     "vehicles_short": (
         "плановый интервал требует машин: {required_vehicles}, по оплатам "
-        "видно {vehicles_on_line}"
+        "видно {vehicles_on_line} — это нижняя граница, в оценку не входит"
     ),
     "duplication": (
         "{share_of_segments_percent}% перегонов маршрут делит "
@@ -256,7 +275,8 @@ REASON_TEXT = {
     ),
     "route_too_long": "длина {length_km} км при пороге {limit_km} км",
     "stops_too_close": (
-        "перегонов короче {limit_m} м: {n_segments} ({share_of_segments_percent}% маршрута)"
+        "остановки ближе {limit_m} м друг к другу: {n_segments} перегонов "
+        "({share_of_segments_percent}% маршрута)"
     ),
 }
 
@@ -280,7 +300,14 @@ def attention(store: Store, weekday: str, hour: int, limit: int) -> dict:
     """
     marked = dataquality.flags(store)
     everything = compute(store, weekday, hour)
-    ranked = [r for r in everything if r["signs"] and r["route_num"] not in marked]
+    # В список идут только маршруты с признаком, у которого есть вес. Иначе
+    # верх занимали бы те, у кого сработало одно наблюдение о данных.
+    ranked = [r for r in everything if r["score"] > 0 and r["route_num"] not in marked]
+    informational = [
+        r
+        for r in everything
+        if r["signs"] and r["score"] <= 0 and r["route_num"] not in marked
+    ]
     top = []
     for entry in ranked[:limit]:
         top.append({**entry, "reasons": reasons(entry)})
@@ -297,6 +324,8 @@ def attention(store: Store, weekday: str, hour: int, limit: int) -> dict:
         "hour_label": f"{hour}:00",
         "routes_total": len(everything),
         "routes_with_signs": len(ranked),
+        # сработало только то, что в оценку не идёт: не претензия, но и не ноль
+        "routes_informational_only": len(informational),
         # что выпало из ранжирования и почему — признак качества данных,
         # который интерфейс показывает рядом со списком
         "excluded_unreliable": excluded,

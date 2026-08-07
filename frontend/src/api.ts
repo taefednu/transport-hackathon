@@ -321,6 +321,8 @@ export interface Attention {
   hour: number
   routes_total: number
   routes_with_signs: number
+  /** Сработало только то, что в оценку не идёт: наблюдение, а не претензия. */
+  routes_informational_only: number
   routes_shown: number
   /** Маршруты с невозможными исходными значениями: в ранжирование не берутся. */
   excluded_unreliable: { route_num: string; reasons: string[] }[]

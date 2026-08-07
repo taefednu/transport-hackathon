@@ -92,6 +92,16 @@ export function AttentionPanel({
         </div>
       )}
 
+      {/* Не претензия к маршруту, но и не пустое место: у этих сработало
+          только сравнение с числом бортов по оплатам, а оно — нижняя граница. */}
+      {data && data.routes_informational_only > 0 && (
+        <div className="att-note att-note-block">
+          ещё у <span className="num">{data.routes_informational_only}</span> маршрутов сработало
+          только сравнение с числом бортов по оплатам — оно нижняя граница выпуска и в оценку
+          не входит
+        </div>
+      )}
+
       {data && data.excluded_count > 0 && (
         <div className="att-excluded">
           <button className="att-excluded-btn" onClick={() => setShowExcluded((v) => !v)}>

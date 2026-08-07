@@ -1,7 +1,7 @@
 /** Карта: подложка, сеть, остановки, наведение, выбор и режим редактирования. */
 
 import { useEffect, useRef, useState } from 'react'
-import { Map as MlMap, type MapMouseEvent, type Point, type PointLike } from 'maplibre-gl'
+import { Map as MlMap, type MapMouseEvent, type PointLike } from 'maplibre-gl'
 import type {
   LineString as GeoLineString,
   MultiLineString as GeoMultiLineString,
@@ -10,7 +10,15 @@ import type {
 import type { Direction, StopsCollection } from './api'
 import { CITY_CENTER, CITY_MAX_BOUNDS, CITY_ZOOM, loadMutedStyle } from './basemap'
 import type { NetworkIndex, SegmentFeature } from './network'
-import { addDataLayers, applySelection, LYR, segmentPropsById, SRC, type Selection } from './mapLayers'
+import {
+  addDataLayers,
+  applySelection,
+  LYR,
+  segmentPropsById,
+  setRegistryTraceVisible,
+  SRC,
+  type Selection,
+} from './mapLayers'
 import {
   addEditLayers,
   EDIT_LYR,
@@ -46,7 +54,12 @@ export interface MapViewProps {
   /** §3.1 — второй выбранный маршрут в режиме сравнения. */
   compare: Selection | null
   selectedStop: string | null
-  editing: boolean
+  /**
+   * Инструмент карты. Раньше сюда приходило одно `editing: boolean`, и правка
+   * трассы со вставкой остановки жили в одном режиме — клик доставался тому,
+   * кто первым его поймает. Теперь у каждого свой.
+   */
+  tool: 'select' | 'edit' | 'insert'
   /** Текущая цепочка выбранного маршрута с учётом правок. */
   chain: HandlePoint[]
   pickedSeq: number | null
@@ -86,6 +99,15 @@ export interface MapViewProps {
   onReady: (map: MlMap) => void
 }
 
+/**
+ * Экранная точка. Своя, а не maplibre-вская: во время перетаскивания она
+ * собирается из события окна, и тащить ради этого класс Point незачем.
+ */
+interface ScreenPoint {
+  x: number
+  y: number
+}
+
 type HoverRef = { source: string; id: string | number } | null
 
 export interface ContextTarget {
@@ -105,8 +127,22 @@ export interface HexHover {
   y: number
 }
 
-/** §8.2 — курсор притягивается к остановке в этом радиусе. */
-const SNAP_PX = 30
+/**
+ * §8.2 — курсор притягивается к остановке в этом радиусе.
+ * Тридцати пикселей не хватало: попасть в остановку при перетаскивании
+ * получалось не с первого раза, а промах молча отменяет правку.
+ */
+const SNAP_PX = 64
+/**
+ * Shift+клик обрезает маршрут. Радиус больше обычного попадания по ручке:
+ * промах мимо ручки раньше проваливался во вставку остановки, то есть
+ * неточное движение делало не то, что просили.
+ */
+const TRIM_PX = 26
+/** Ближе этого к краю окна карта подкручивается сама во время перетаскивания. */
+const EDGE_PX = 70
+/** Максимальная скорость автопрокрутки, пикселей за кадр. */
+const EDGE_SPEED_PX = 14
 
 export function MapView(props: MapViewProps): React.JSX.Element {
   const container = useRef<HTMLDivElement>(null)
@@ -120,7 +156,11 @@ export function MapView(props: MapViewProps): React.JSX.Element {
   const markedStops = useRef<Set<string>>(new Set())
   const propsById = useRef<Map<number, SegmentFeature['properties']>>(new Map())
   const hovered = useRef<HoverRef>(null)
-  const dragging = useRef<{ from: LngLat; snapped: string | null } | null>(null)
+  const dragging = useRef<{ from: LngLat; snapped: string | null; point: ScreenPoint } | null>(null)
+  /** Кадр автопрокрутки к краю окна во время перетаскивания. */
+  const edgePan = useRef<number | null>(null)
+  const endDragRef = useRef<(() => void) | null>(null)
+  const windowMoveRef = useRef<((ev: MouseEvent) => void) | null>(null)
   // колбэки и данные меняются каждый рендер, а обработчики вешаются один раз
   const latest = useRef(props)
   latest.current = props
@@ -179,22 +219,22 @@ export function MapView(props: MapViewProps): React.JSX.Element {
         latest.current.onReady(map)
       })
 
-      const box = (point: Point, r: number): [PointLike, PointLike] => [
+      const box = (point: ScreenPoint, r: number): [PointLike, PointLike] => [
         [point.x - r, point.y - r],
         [point.x + r, point.y + r],
       ]
 
-      const handleAt = (point: Point) => {
+      const handleAt = (point: ScreenPoint, radius: number = HIT.stop) => {
         if (!map.getLayer(EDIT_LYR.handles)) return null
-        return map.queryRenderedFeatures(box(point, HIT.stop), { layers: [EDIT_LYR.handles] })[0] ?? null
+        return map.queryRenderedFeatures(box(point, radius), { layers: [EDIT_LYR.handles] })[0] ?? null
       }
 
-      const stopAt = (point: Point, radius: number = HIT.stop) => {
+      const stopAt = (point: ScreenPoint, radius: number = HIT.stop) => {
         const layers = [LYR.stops, LYR.stopsMetro].filter((l) => map.getLayer(l))
         return map.queryRenderedFeatures(box(point, radius), { layers })[0] ?? null
       }
 
-      const pickAt = (point: Point) => {
+      const pickAt = (point: ScreenPoint) => {
         // §1: клик идёт сверху вниз, остановка перехватывает раньше линии
         const stop = stopAt(point)
         if (stop) return { kind: 'stop' as const, feature: stop }
@@ -272,34 +312,111 @@ export function MapView(props: MapViewProps): React.JSX.Element {
         map.setFeatureState(hovered.current, { hover: true })
       }
 
+      /**
+       * Перерисовать штриховую линию и цель под текущей точкой курсора.
+       * Вынесено из mousemove, потому что то же самое нужно каждому кадру
+       * автопрокрутки: карта уехала — цель под курсором стала другой.
+       */
+      const refreshDraft = (point: ScreenPoint) => {
+        if (!dragging.current) return
+        const stop = stopAt(point, SNAP_PX)
+        const snappedId = stop ? String(stop.properties?.stop_id ?? '') : null
+        const snapCoord = stop ? ((stop.geometry as GeoPoint).coordinates as LngLat) : null
+        const cursor = map.unproject([point.x, point.y])
+        setDraft(
+          map,
+          [dragging.current.from, snapCoord ?? [cursor.lng, cursor.lat]],
+          snapCoord,
+        )
+        if (snappedId !== dragging.current.snapped) {
+          dragging.current.snapped = snappedId
+          latest.current.onExtendPreview(snappedId)
+        }
+      }
+
+      /**
+       * Точка курсора в координатах холста — из события окна.
+       *
+       * Слушать окно, а не карту, обязательно: справа и слева карту закрывают
+       * панели, и как только курсор наезжает на них, MapLibre перестаёт слать
+       * mousemove. До края окна при этом не добраться — а именно к краю его и
+       * ведут, чтобы карта подкрутилась.
+       */
+      const pointFromWindow = (ev: MouseEvent): ScreenPoint => {
+        const rect = map.getCanvas().getBoundingClientRect()
+        return { x: ev.clientX - rect.left, y: ev.clientY - rect.top }
+      }
+
+      const onWindowMove = (ev: MouseEvent) => {
+        if (!dragging.current) return
+        dragging.current.point = pointFromWindow(ev)
+        refreshDraft(dragging.current.point)
+      }
+
+      /** Насколько подкрутить карту: тем быстрее, чем ближе курсор к краю. */
+      const edgeShift = (point: ScreenPoint): [number, number] => {
+        const { clientWidth: w, clientHeight: h } = map.getCanvas()
+        const push = (near: number) => Math.min(1, Math.max(0, (EDGE_PX - near) / EDGE_PX))
+        const dx = push(point.x) * -EDGE_SPEED_PX + push(w - point.x) * EDGE_SPEED_PX
+        const dy = push(point.y) * -EDGE_SPEED_PX + push(h - point.y) * EDGE_SPEED_PX
+        return [dx, dy]
+      }
+
+      const stopEdgePan = () => {
+        if (edgePan.current !== null) cancelAnimationFrame(edgePan.current)
+        edgePan.current = null
+      }
+
+      // §8.2 — тянуть конец трассы за край окна: без этого продлить маршрут
+      // дальше видимой области было нельзя, а зумировать одной рукой некуда
+      const edgeStep = () => {
+        const state = dragging.current
+        if (!state) return stopEdgePan()
+        const [dx, dy] = edgeShift(state.point)
+        if (dx || dy) {
+          // jumpTo, а не panBy: panBy идёт через easeTo, а тот применяет
+          // сдвиг на следующем кадре отрисовки. Пока курсор стоит у края и
+          // новых событий мыши нет, каждый следующий вызов отменял предыдущий,
+          // и карта не двигалась вовсе. jumpTo меняет камеру сразу.
+          const canvas = map.getCanvas()
+          map.jumpTo({
+            center: map.unproject([canvas.clientWidth / 2 + dx, canvas.clientHeight / 2 + dy]),
+          })
+          refreshDraft(state.point)
+        }
+        edgePan.current = requestAnimationFrame(edgeStep)
+      }
+
       map.on('mousedown', (e: MapMouseEvent) => {
-        if (!readyRef.current || !latest.current.editing) return
+        // Тянуть можно только в режиме правки трассы. Во «вставке» перетаскивание
+        // ручки означало бы продление — а человек выбрал другой инструмент.
+        if (!readyRef.current || latest.current.tool !== 'edit') return
         const handle = handleAt(e.point)
         if (!handle?.properties?.tail) return
         e.preventDefault()
         map.dragPan.disable()
-        dragging.current = { from: (handle.geometry as GeoPoint).coordinates as LngLat, snapped: null }
+        dragging.current = {
+          from: (handle.geometry as GeoPoint).coordinates as LngLat,
+          snapped: null,
+          point: e.point,
+        }
         map.getCanvas().style.cursor = 'grabbing'
+        stopEdgePan()
+        // capture: событие ловится до того, как его успеет остановить
+        // что-нибудь из панелей, лежащих поверх карты
+        window.addEventListener('mousemove', onWindowMove, true)
+        edgePan.current = requestAnimationFrame(edgeStep)
       })
 
       map.on('mousemove', (e: MapMouseEvent) => {
         if (!readyRef.current) return
 
-        if (dragging.current) {
-          const stop = stopAt(e.point, SNAP_PX)
-          const snappedId = stop ? String(stop.properties?.stop_id ?? '') : null
-          const snapCoord = stop ? ((stop.geometry as GeoPoint).coordinates as LngLat) : null
-          const cursor: LngLat = [e.lngLat.lng, e.lngLat.lat]
-          setDraft(map, [dragging.current.from, snapCoord ?? cursor], snapCoord)
-          if (snappedId !== dragging.current.snapped) {
-            dragging.current.snapped = snappedId
-            latest.current.onExtendPreview(snappedId)
-          }
-          return
-        }
+        // во время перетаскивания курсор ведёт окно: см. onWindowMove
+        if (dragging.current) return
 
-        if (latest.current.editing) {
-          const handle = handleAt(e.point)
+        const tool = latest.current.tool
+        if (tool !== 'select') {
+          const handle = tool === 'edit' ? handleAt(e.point) : null
           if (handle && handle.id !== undefined) {
             setHover(EDIT_SRC.handles, handle.id)
             map.getCanvas().style.cursor = handle.properties?.tail ? 'grab' : 'pointer'
@@ -311,9 +428,12 @@ export function MapView(props: MapViewProps): React.JSX.Element {
           // §8.4 — над участком линии показываем призрачную точку: сюда
           // встанет остановка, если кликнуть. Точка садится на саму линию,
           // а не под курсор, иначе она обещает место, которого на трассе нет.
-          const onLine = map.queryRenderedFeatures(box(e.point, HIT.line), {
-            layers: [LYR.routesSelected, EDIT_LYR.changed].filter((l) => map.getLayer(l)),
-          })[0]
+          const onLine =
+            tool === 'insert'
+              ? map.queryRenderedFeatures(box(e.point, HIT.line), {
+                  layers: [LYR.routesSelected, EDIT_LYR.changed].filter((l) => map.getLayer(l)),
+                })[0]
+              : undefined
           if (onLine) {
             const geometry = onLine.geometry as GeoLineString | GeoMultiLineString
             const parts: LngLat[][] =
@@ -364,26 +484,31 @@ export function MapView(props: MapViewProps): React.JSX.Element {
         latest.current.onHexHover(null)
       })
 
-      map.on('mouseup', () => {
+      const endDrag = () => {
         if (!dragging.current) return
         const snapped = dragging.current.snapped
         dragging.current = null
+        stopEdgePan()
+        window.removeEventListener('mousemove', onWindowMove, true)
         map.dragPan.enable()
         setDraft(map, null, null)
         map.getCanvas().style.cursor = 'crosshair'
         // §8.2: отпускание вне остановки — правка не применяется, без модалок
         if (snapped) latest.current.onExtend(snapped)
         else latest.current.onExtendPreview(null)
-      })
+      }
 
+      map.on('mouseup', endDrag)
+      // Кнопку могут отпустить за пределами холста — при автопрокрутке курсор
+      // как раз стоит у самого края. Без окна перетаскивание бы не кончилось.
+      window.addEventListener('mouseup', endDrag)
+      endDragRef.current = endDrag
+      windowMoveRef.current = onWindowMove
+
+      // Курсор ушёл за пределы карты — но перетаскивание не отменяем: во время
+      // него он уходит к краю намеренно, чтобы карта подкрутилась под ним.
       map.on('mouseout', () => {
         clearHover()
-        if (dragging.current) {
-          dragging.current = null
-          map.dragPan.enable()
-          setDraft(map, null, null)
-          latest.current.onExtendPreview(null)
-        }
       })
 
       // §8.3 — правая кнопка называет словами то, что иначе делается Shift'ом
@@ -407,16 +532,25 @@ export function MapView(props: MapViewProps): React.JSX.Element {
       map.on('click', (e: MapMouseEvent) => {
         if (!readyRef.current) return
 
-        if (latest.current.editing) {
-          const handle = handleAt(e.point)
-          if (handle) {
-            const seq = Number(handle.properties?.seq ?? -1)
-            if (seq < 0) return
-            // §8.3 — Shift обрезает маршрут до этой остановки
-            if (e.originalEvent.shiftKey) latest.current.onTrim(seq)
-            else latest.current.onPickHandle(seq)
+        // Инструменты не спорят за клик: правка трассы работает по ручкам,
+        // вставка — по линии. Раньше оба жили в одном режиме, и Shift, чуть
+        // промахнувшийся мимо ручки, проваливался во вставку остановки.
+        if (latest.current.tool === 'edit') {
+          // §8.3 — Shift обрезает маршрут до этой остановки. Радиус больше
+          // обычного: обрезка необратимее выбора, промах дороже.
+          if (e.originalEvent.shiftKey) {
+            const target = handleAt(e.point, TRIM_PX)
+            const seq = Number(target?.properties?.seq ?? -1)
+            if (target && seq >= 0) latest.current.onTrim(seq)
             return
           }
+          const handle = handleAt(e.point)
+          const seq = Number(handle?.properties?.seq ?? -1)
+          latest.current.onPickHandle(handle && seq >= 0 ? seq : null)
+          return
+        }
+
+        if (latest.current.tool === 'insert') {
           // §8.4 — клик по участку линии предлагает вставить остановку.
           // Требуем попадания в саму линию, иначе клик по пустому месту
           // открывал бы список на другом конце города.
@@ -425,12 +559,8 @@ export function MapView(props: MapViewProps): React.JSX.Element {
           })[0]
           if (onLine) {
             const after = nearestChainSegment(latest.current.chain, [e.lngLat.lng, e.lngLat.lat])
-            if (after !== null) {
-              latest.current.onInsertAt(after, [e.lngLat.lng, e.lngLat.lat])
-              return
-            }
+            if (after !== null) latest.current.onInsertAt(after, [e.lngLat.lng, e.lngLat.lat])
           }
-          latest.current.onPickHandle(null)
           return
         }
 
@@ -461,6 +591,9 @@ export function MapView(props: MapViewProps): React.JSX.Element {
 
     return () => {
       cancelled = true
+      if (edgePan.current !== null) cancelAnimationFrame(edgePan.current)
+      if (endDragRef.current) window.removeEventListener('mouseup', endDragRef.current)
+      if (windowMoveRef.current) window.removeEventListener('mousemove', windowMoveRef.current, true)
       mapRef.current?.remove()
       mapRef.current = null
       readyRef.current = false
@@ -478,8 +611,9 @@ export function MapView(props: MapViewProps): React.JSX.Element {
       recentered.current,
       markedStops.current,
       props.compare,
+      props.changedGeometry !== null,
     )
-  }, [ready, props.selection, props.compare, props.network])
+  }, [ready, props.selection, props.compare, props.network, props.changedGeometry])
 
   // выделенная остановка — тоже состояние объекта, а не перерисовка слоя
   const pickedStop = useRef<string | null>(null)
@@ -499,18 +633,25 @@ export function MapView(props: MapViewProps): React.JSX.Element {
   useEffect(() => {
     const map = mapRef.current
     if (!map || !readyRef.current) return
-    setHandles(map, props.editing ? props.chain : [])
-    if (!props.editing) setGhostInsert(map, null)
-    map.getCanvas().style.cursor = props.editing ? 'crosshair' : ''
+    // Ручки нужны обоим режимам правки: во вставке они показывают, между
+    // какими остановками встанет новая, хотя тянуть за них там нельзя.
+    const editing = props.tool !== 'select'
+    setHandles(map, editing ? props.chain : [])
+    if (props.tool !== 'insert') setGhostInsert(map, null)
+    map.getCanvas().style.cursor = editing ? 'crosshair' : ''
     // Рамочное увеличение включается по Shift и съедает событие click вместе
     // с ним — из-за этого «Shift+клик по ручке — обрезать» (§8.3) не доходил
     // до обработчика вовсе. В правке рамка не нужна, а обрезка нужна.
-    if (props.editing) map.boxZoom.disable()
+    if (editing) map.boxZoom.disable()
     else map.boxZoom.enable()
     // §8: в режиме редактирования остальная сеть гаснет сильнее обычного,
     // а на выходе выражение прозрачности возвращает правило приглушения
-    if (props.editing) map.setPaintProperty(LYR.routesIdle, 'line-opacity', 0.08)
-    else {
+    if (editing) {
+      map.setPaintProperty(LYR.routesIdle, 'line-opacity', 0.08)
+      // Обрезают маршрут именно отсюда, и линия из реестра должна уйти сразу,
+      // а не после выхода из режима: applySelection в правке не вызывается.
+      setRegistryTraceVisible(map, props.selection, props.changedGeometry === null)
+    } else {
       applySelection(
         map,
         props.network,
@@ -519,9 +660,18 @@ export function MapView(props: MapViewProps): React.JSX.Element {
         recentered.current,
         markedStops.current,
         props.compare,
+        props.changedGeometry !== null,
       )
     }
-  }, [ready, props.editing, props.chain, props.network, props.selection, props.compare])
+  }, [
+    ready,
+    props.tool,
+    props.chain,
+    props.network,
+    props.selection,
+    props.compare,
+    props.changedGeometry,
+  ])
 
   const markedSeq = useRef<number | null>(null)
   useEffect(() => {

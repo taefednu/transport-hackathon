@@ -1732,3 +1732,12 @@ button.panel-head:hover {
   color: var(--faint);
   cursor: default;
 }
+
+/* наблюдение под списком: отделено линией, но не кричит */
+.att-note-block {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11px;
+  line-height: 1.35;
+}

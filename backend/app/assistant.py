@@ -62,6 +62,16 @@ INTENT_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
         re.compile(r"покрыти|сколько людей|доступност|pnt|пнт|метрик"),
         "coverage_summary",
     ),
+    # вопрос о полноте данных — это вопрос к системе, а не мимо неё. Стоит выше
+    # профиля маршрута: «цельные маршруты» иначе поймается словом «маршрут»
+    (
+        re.compile(
+            r"цельн|целостн|полные данные|данные полн|полнота|достоверн|"
+            r"можно ли доверять|насколько точн|чего не хватает|что известно|"
+            r"качество данных|откуда данные|источник данных"
+        ),
+        "data_summary",
+    ),
     (
         re.compile(r"расскажи|покажи маршрут|что с маршрутом|про маршрут|интервал|время хода"),
         "route_profile",
@@ -354,8 +364,39 @@ def _render_find(result: dict) -> str:
     return " ".join(parts)
 
 
+def _render_data_summary(result: dict) -> str:
+    parts = [
+        f"В базе {fmt(result['route_numbers'])} маршрутов, "
+        f"{fmt(result['directions'])} направлений. Точный порядок остановок "
+        f"восстановлен у {fmt(result['directions_with_restored_stop_order'])} направлений — "
+        f"только по ним считаются расписание, время хода и сценарии; "
+        f"у {fmt(result['directions_without_stop_order'])} порядка нет. "
+        f"Трасса есть у {fmt(result['directions_with_trace'])}."
+    ]
+    if result["routes_with_defective_source_data"]:
+        parts.append(
+            f"Помечено маршрутов с невозможными исходными значениями: "
+            f"{fmt(result['routes_with_defective_source_data'])} "
+            f"({', '.join(result['routes_with_defective_source_data_numbers'])}) — они открываются, "
+            f"но изъяты из ранжирования и подбора."
+        )
+    parts.append(
+        f"Остановок {fmt(result['stops_total'])}, из них обслуживаемых "
+        f"{fmt(result['stops_served'])}."
+    )
+    if result["segments_by_real_traffic_percent"] is not None:
+        parts.append(
+            f"По реальному трафику посчитано "
+            f"{fmt(result['segments_by_real_traffic_percent'])}% перегонов, "
+            f"остальное — по медиане скорости города."
+        )
+    parts.append("Чего нет: " + "; ".join(result["not_available"]) + ".")
+    return " ".join(parts)
+
+
 RENDERERS = {
     "routes_attention": _render_attention,
+    "data_summary": _render_data_summary,
     "route_profile": _render_profile,
     "route_options": _render_options,
     "coverage_holes": _render_holes,
@@ -406,7 +447,10 @@ def render(steps: list[dict]) -> str:
     parts = []
     for step in steps:
         if step.get("error"):
-            parts.append(f"{step['tool']}: {step['error']}.")
+            # без имени инструмента: текст ошибки уже написан для человека
+            # («маршрут 93 исключён из подбора, потому что…»), а приставка
+            # `route_options:` превращает ответ в строку лога
+            parts.append(f"{step['error'].rstrip('.')}.")
         elif step.get("result") is not None:
             parts.append(RENDERERS[step["tool"]](step["result"]))
     return "\n\n".join(parts) if parts else "Нечего показать: ни один расчёт не выполнился."
@@ -694,9 +738,14 @@ def ask(
     # полем, поэтому их числа — такие же посчитанные, как числа инструментов
     allowed = explain_mod.allowed_numbers({**evidence, "оговорки": notes})
 
-    if llm.available() and left() > config.LLM_TIMEOUT_SEC and any(
-        step.get("result") is not None for step in steps
-    ):
+    # Пересказывается и отказ инструмента: «маршрут 93 исключён из подбора,
+    # потому что между остановками 11.1 км» — это ответ по существу, а не
+    # техническая ошибка, и человеку он нужен фразой, а не строкой лога.
+    # Числа отказа лежат в тех же доказательствах, охрана чисел их видит.
+    has_something = any(
+        step.get("result") is not None or step.get("error") for step in steps
+    )
+    if llm.available() and left() > config.LLM_TIMEOUT_SEC and has_something:
         answer = llm.complete(
             toolspecs.ANSWER_SYSTEM.format(limit=config.ANSWER_MAX_CHARS),
             toolspecs.answer_user(question, for_prompt(evidence)),
@@ -719,7 +768,14 @@ def ask(
             else:
                 text, source, reason = answer.text, answer.source, None
     elif llm.available():
-        reason = reason or "не осталось бюджета времени на пересказ моделью"
+        # Причина называется настоящая. Раньше здесь всегда стоял бюджет, и на
+        # отказ инструмента человек получал «не осталось бюджета времени», хотя
+        # времени было сколько угодно — просто пересказывать было нечего.
+        reason = reason or (
+            "не осталось бюджета времени на пересказ моделью"
+            if has_something
+            else "инструмент ничего не вернул — пересказывать нечего"
+        )
 
     actions = [action for step in steps for action in actions_for(step)]
     return done(

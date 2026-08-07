@@ -20,6 +20,7 @@ export const EDIT_SRC = {
 export const EDIT_LYR = {
   changed: 'edit-changed-line',
   draft: 'edit-draft-line',
+  snapHalo: 'edit-snap-halo',
   ghost: 'edit-ghost-point',
   tailHalo: 'edit-tail-halo',
   handles: 'edit-handle-points',
@@ -67,17 +68,34 @@ export function addEditLayers(map: MlMap): void {
     paint: { 'line-color': C.selected, 'line-width': 2, 'line-dasharray': [4, 4] },
   })
 
-  // точка привязки: сплошной кружок на остановке, к которой притянуло
+  // §8.2 — цель притяжения. Раньше это был кружок радиусом 6: на карте с
+  // остановками того же размера понять, куда встанет конец трассы, было нельзя.
+  // Теперь мишень в два кольца — её видно, не отрывая взгляда от курсора.
+  map.addLayer({
+    id: EDIT_LYR.snapHalo,
+    type: 'circle',
+    source: EDIT_SRC.draft,
+    filter: ['==', ['geometry-type'], 'Point'],
+    paint: {
+      'circle-radius': 18,
+      'circle-color': C.added,
+      'circle-opacity': 0.16,
+      'circle-stroke-color': C.added,
+      'circle-stroke-width': 2,
+      'circle-stroke-opacity': 0.6,
+    },
+  })
+
   map.addLayer({
     id: EDIT_LYR.ghost,
     type: 'circle',
     source: EDIT_SRC.draft,
     filter: ['==', ['geometry-type'], 'Point'],
     paint: {
-      'circle-radius': 6,
+      'circle-radius': 8,
       'circle-color': C.added,
       'circle-stroke-color': '#FFFFFF',
-      'circle-stroke-width': 2,
+      'circle-stroke-width': 3,
     },
   })
 

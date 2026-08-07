@@ -629,6 +629,55 @@ def coverage_summary(store: Store, index: list, params: dict) -> dict:
     }
 
 
+def data_summary(store: Store, index: list, params: dict) -> dict:
+    """Что система знает о сети и чего не знает.
+
+    Вопрос «а данные-то у нас полные?» — не вне возможностей системы, а ровно
+    про то, о чём она обязана говорить вслух. Раньше на него приходил отказ со
+    списком умений: расчёта не было, и модель относила вопрос к чужим темам.
+    """
+    routes = store.routes
+    total_directions = routes.height
+    exact = routes.filter(pl.col("quality") == "exact").height
+    with_geometry = routes.filter(
+        pl.col("geometry_wkt").is_not_null() & (pl.col("geometry_wkt") != "")
+    ).height
+
+    flagged = dataquality.flags(store)
+    served = int(store.stops.filter(pl.col("n_routes") > 0).height)
+
+    traffic_share = None
+    if store.segment_time is not None and store.segment_time.height:
+        rows = store.segment_time.height
+        by_traffic = store.segment_time.filter(pl.col("source") == "traffic").height
+        traffic_share = round(by_traffic / rows * 100, 1)
+
+    return {
+        "route_numbers": int(routes["route_num"].n_unique()),
+        "directions": int(total_directions),
+        # «цельный маршрут» — это направление с восстановленным порядком
+        # остановок: по нему считается расписание, время хода и сценарии.
+        # Имена полей развёрнуты намеренно: модель пересказывает ключи, и
+        # короткое `flagged_impossible` она прочла как «невозможен для проезда»
+        "directions_with_restored_stop_order": int(exact),
+        "directions_without_stop_order": int(total_directions - exact),
+        "directions_with_trace": int(with_geometry),
+        "routes_with_defective_source_data": int(len(flagged)),
+        "routes_with_defective_source_data_numbers": sorted(flagged),
+        "stops_total": int(store.stops.height),
+        "stops_served": served,
+        "segments_by_real_traffic_percent": traffic_share,
+        "population_layer_date": config.ACTIVE_POPULATION_DATE,
+        # то, чего нет вовсе: называется здесь же, чтобы вопрос о полноте
+        # получал полный ответ, а не только приятную его половину
+        "not_available": [
+            "порядок остановок известен не у всех направлений, поэтому PNFT-15 — нижняя оценка",
+            "GPS-треков автобусов в данных нет",
+            "матрицы корреспонденций по Ташкенту нет: система оплаты регистрирует только вход",
+        ],
+    }
+
+
 def scenario_from_text(store: Store, index: list, params: dict) -> dict:
     text = str(params.get("text") or "").strip()
     if not text:
@@ -706,6 +755,7 @@ REGISTRY = {
     "route_options": route_options,
     "coverage_holes": coverage_holes,
     "coverage_summary": coverage_summary,
+    "data_summary": data_summary,
     "scenario_from_text": scenario_from_text,
     "scenario_effect": scenario_effect,
     "find": find,

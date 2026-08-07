@@ -444,8 +444,11 @@ export function App(): React.JSX.Element {
 
   // Каждый вход в правку показывает инструкцию заново: набор действий у
   // «править» и «вставить» разный, и человек редактирует не каждый день.
+  // Заодно снимается список вставки: он принадлежит инструменту вставки и
+  // после переключения висел над картой, перехватывая клики.
   useEffect(() => {
     if (tool !== 'select') setHintDone(false)
+    setInsertRequest(null)
   }, [tool])
 
   const onSelectRoute = useCallback(
@@ -925,7 +928,7 @@ export function App(): React.JSX.Element {
           stops={data.stops}
           selection={selection}
           selectedStop={selectedStop}
-          editing={editing}
+          tool={tool}
           chain={chain}
           pickedSeq={pickedSeq}
           changedGeometry={changedGeometry}
