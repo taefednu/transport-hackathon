@@ -375,6 +375,54 @@ export interface RouteOptions {
   note: string
 }
 
+/**
+ * Строка панели улучшений: тот же вариант продления плюс имя маршрута.
+ *
+ * Поля цены nullable, а `ExtensionOption` объявляет их обязательными, поэтому
+ * они переопределены через `Omit`: в день, когда маршрут не работает, цену
+ * считать нечем, и строка приходит с причиной вместо чисел. `scenario` тоже
+ * null в этом случае: применять сценарий, цену которого мы не смогли
+ * посчитать, нельзя — мы не предлагаем то, что не сумели оценить.
+ */
+export interface ImprovementRow
+  extends Omit<
+    ExtensionOption,
+    | 'cycle_time_before_min'
+    | 'cycle_time_after_min'
+    | 'required_vehicles_before'
+    | 'required_vehicles_after'
+    | 'extra_vehicles'
+    | 'scenario'
+  > {
+  name: string
+  /** Номер маршрута выше по списку с той же целью, иначе null. */
+  same_stop_as: string | null
+  cycle_time_before_min: number | null
+  cycle_time_after_min: number | null
+  required_vehicles_before: number | null
+  required_vehicles_after: number | null
+  extra_vehicles: number | null
+  scenario: ExtensionOption['scenario'] | null
+  /** Готовая фраза, почему цены нет. `null` — цена посчитана. */
+  cost_unavailable: string | null
+}
+
+export interface Improvements {
+  status: 'computing' | 'ready' | 'failed'
+  /** Прогресс считается по маршрутам в переборе, а не по всем 165. */
+  routes_done: number
+  routes_total: number
+  routes_scanned: number
+  error: string | null
+  weekday: Weekday
+  hour: number
+  hour_label: string
+  routes_with_options: number
+  routes_shown: number
+  excluded_count: number
+  routes: ImprovementRow[]
+}
+
 export interface HoleOptions {
   h3: string
   people: number
@@ -529,6 +577,8 @@ export const api = {
     req<Headways>(`/api/headways?weekday=${weekday}&hour=${hour}`),
   attention: (weekday: Weekday, hour: number, limit = 12) =>
     req<Attention>(`/api/diagnostics/attention?weekday=${weekday}&hour=${hour}&limit=${limit}`),
+  improvements: (weekday: Weekday, hour: number, limit = 12) =>
+    req<Improvements>(`/api/improvements?weekday=${weekday}&hour=${hour}&limit=${limit}`),
   routeOptions: (routeNum: string, weekday: Weekday, hour: number, signal?: AbortSignal) =>
     req<RouteOptions>(
       `/api/routes/${encodeURIComponent(routeNum)}/options?weekday=${weekday}&hour=${hour}`,

@@ -20,6 +20,7 @@ from app import (
     dataquality,
     diagnostics,
     explain as explain_mod,
+    improvements,
     llm,
     nlparse,
     scenario,
@@ -46,6 +47,12 @@ async def lifespan(app: FastAPI):
     dataquality.housing_near_stops(STATE["store"])
     diagnostics.compute(STATE["store"], config.WEEKDAY_TYPES[0], 8)
     tools.warm(STATE["store"])
+    # перебор продлений по всем маршрутам: 20 с, поэтому в фоне. Стартует
+    # после warm — все кэши, из которых поток читает, уже наполнены, и писать
+    # ему не во что
+    improvements.start(
+        STATE["store"], STATE["search_index"], config.WEEKDAY_TYPES[0], 8
+    )
     yield
     STATE.clear()
 
@@ -476,6 +483,21 @@ def diagnostics_attention(
     """
     check_weekday(weekday)
     return diagnostics.attention(store(), weekday, hour, limit)
+
+
+@app.get("/api/improvements")
+def improvements_panel(
+    weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
+    hour: int = Query(default=8, ge=0, le=23),
+    limit: int = Query(default=12, ge=1, le=50),
+) -> dict:
+    """Что стоит продлить и что это даст в людях.
+
+    Отвечает всегда: пока фоновый перебор не досчитал, приходит `status`
+    и счётчик, а не пустой список, который читается как «улучшать нечего».
+    """
+    check_weekday(weekday)
+    return improvements.snapshot(store(), weekday, hour, limit)
 
 
 @app.get("/api/routes/{route_num}/options")

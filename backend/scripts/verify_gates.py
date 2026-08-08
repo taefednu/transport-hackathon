@@ -13,8 +13,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-BASE = f"http://127.0.0.1:{sys.argv[1] if len(sys.argv) > 1 else 8023}"
+PORT = sys.argv[1] if len(sys.argv) > 1 else 8023
+BASE = f"http://127.0.0.1:{PORT}"
 results: list[tuple[str, bool, str]] = []
+# Разовый снимок панели улучшений, взятый первым делом в main() — см. комментарий там.
+progress_seen: dict | None = None
 
 
 def get(path: str):
@@ -966,7 +969,163 @@ def gate22(store, route_num: str) -> dict:
     return {"measured": measured}
 
 
+def gate23(store):
+    """Панель улучшений: досчитывается, ранжирует по людям, цена зависит от дня.
+
+    Гейт держит исходную претензию к продукту: маршрут, дающий больше всех
+    людей, обязан быть виден без прокрутки, а не стоять 33-м.
+
+    Номер 23, а не 20: 20 занят гейтом невозможных значений (см. gate20 выше),
+    план называл этот гейт «20» до того, как тот номер оказался занят.
+    """
+    from app import scenario as scenario_mod
+
+    data = None
+    for _ in range(60):
+        data, _ms = get_json("/api/improvements?weekday=fri&hour=8&limit=12")
+        if data["status"] != "computing":
+            break
+        time.sleep(1)
+
+    check(
+        "Гейт 23а — перебор продлений досчитывается",
+        data is not None and data["status"] == "ready",
+        f"статус {data['status']}, посчитано {data['routes_done']} из {data['routes_total']} "
+        f"(рассмотрено {data['routes_scanned']}), ошибка: {data['error']}",
+    )
+    if data is None or data["status"] != "ready":
+        return
+
+    rows = data["routes"]
+    numbers = [r["route_num"] for r in rows]
+    check(
+        "Гейт 23б — верхняя строка добавляет людей",
+        bool(rows) and rows[0]["gained_people"] > 0,
+        f"верх: маршрут {rows[0]['route_num']} даёт {rows[0]['gained_people']:,} чел. "
+        f"до «{rows[0]['stop_name']}»" if rows else "список пуст",
+    )
+    check(
+        "Гейт 23в — маршрут 32 виден без прокрутки",
+        "32" in numbers,
+        f"первые {len(numbers)} строк: {numbers}",
+    )
+
+    by_num = {r["route_num"]: r for r in rows}
+
+    # Час нельзя проверить через API ни на каком дне: `_COST_CACHE` в
+    # improvements.py ключуется парой (день, длина среза) — час туда
+    # намеренно не входит, — поэтому любые два часа одного дня всегда
+    # получают один и тот же кэшированный пересчёт: `_recost` исполняется
+    # один раз, а не дважды, и сравнение двух ответов эндпоинта не проверяет
+    # вообще ничего (проверено: sat&hour=8 на некэшированном ключе — 1.5 с,
+    # следом sat&hour=22 с тем же ключом — 3.6 мс, отдан кэш). Утверждение
+    # проверяется там, где оно верно на самом деле — в движке напрямую,
+    # без панели и без кэша между вызовом и результатом.
+    ops = rows[0]["scenario"]["ops"]
+    hours_to_check = (6, 8, 22)
+    measured: dict[int, tuple[float, float, int, int, float, float]] = {}
+    for hour in hours_to_check:
+        result = scenario_mod.run(store, "fri", hour, ops)
+        affected = result["affected_routes"][0]
+        measured[hour] = (
+            affected["cycle_time_before"],
+            affected["cycle_time_after"],
+            affected["required_vehicles_before"],
+            affected["required_vehicles_after"],
+            result["gained"],
+            result["lost"],
+        )
+    baseline = measured[hours_to_check[0]]
+    hour_inert = all(v == baseline for v in measured.values())
+    check(
+        "Гейт 23г — в движке весь результат продления не зависит от часа, не только цена (scenario.run напрямую)",
+        hour_inert,
+        "; ".join(
+            f"{hour}:00 → оборот {v[0]:.1f}→{v[1]:.1f} мин, машин {v[2]}→{v[3]}, "
+            f"+{v[4]:,.0f}/−{v[5]:,.0f} чел."
+            for hour, v in measured.items()
+        ),
+    )
+
+    # День влияет: от него зависят и время хода, и окно работы маршрута.
+    saturday, _ms = get_json("/api/improvements?weekday=sat&hour=8&limit=12")
+    same_rows = len(saturday["routes"]) == len(rows)
+    people_same = all(
+        by_num[r["route_num"]]["gained_people"] == r["gained_people"]
+        for r in saturday["routes"]
+        if r["route_num"] in by_num
+    )
+    cost_differs = any(
+        r["cost_unavailable"] is None
+        and (
+            by_num[r["route_num"]]["extra_vehicles"] != r["extra_vehicles"]
+            or by_num[r["route_num"]]["cycle_time_after_min"] != r["cycle_time_after_min"]
+        )
+        for r in saturday["routes"]
+        if r["route_num"] in by_num
+    )
+    check(
+        "Гейт 23г2 — от дня зависит цена, а не люди",
+        same_rows and people_same and cost_differs,
+        f"строк {len(saturday['routes'])} против {len(rows)}; люди совпали: {people_same}; "
+        f"цена изменилась: {cost_differs} (пятница против субботы)",
+    )
+
+    # Воскресенье: часть маршрутов не работает, цену считать нечем. Строка
+    # обязана остаться — молча укоротившийся список неотличим от «вариантов
+    # стало меньше».
+    sunday, _ms = get_json("/api/improvements?weekday=sun&hour=8&limit=12")
+    non_empty = bool(sunday["routes"])
+    kept = len(sunday["routes"]) == len(rows)
+    explained = all(
+        r["cost_unavailable"] or r["extra_vehicles"] is not None for r in sunday["routes"]
+    )
+    check(
+        "Гейт 23е — строка без цены не исчезает, а объясняется",
+        # non_empty — отдельным термом: kept (0 == 0) и explained (all([]) —
+        # True) оба вырождаются на пустом списке, а 23е обязан валиться сам,
+        # не полагаясь на то, что пустой список поймает 23б.
+        non_empty and kept and explained,
+        f"строк {len(sunday['routes'])} против {len(rows)}; без цены и без причины: "
+        + str([r["route_num"] for r in sunday["routes"] if not r["cost_unavailable"] and r["extra_vehicles"] is None]),
+    )
+    # Снимок для 23д берётся не здесь, а первым делом в main() — до store.load()
+    # и до gate1(). Окно "computing" — это ~15 с от старта сервера, а сам gate23
+    # вызывается последним из 23 гейтов; к этому моменту, после нескольких
+    # модельных гейтов (7, 8, 15–19, 22), с момента старта проходит порядка
+    # 40 с — окно давно закрыто. Опрос из этой функции застал бы только "ready".
+    if progress_seen is None:
+        snapshot_ok = False
+        snapshot_detail = "снимок не взят — main() не дошёл до сбора снимка"
+    elif progress_seen["status"] == "computing":
+        snapshot_ok = True
+        snapshot_detail = (
+            f"снимок при старте приёмки: status=computing, посчитано "
+            f"{progress_seen['routes_done']} из {progress_seen['routes_total']} "
+            f"(рассмотрено {progress_seen['routes_scanned']})"
+        )
+    elif progress_seen["status"] == "failed":
+        snapshot_ok = False
+        snapshot_detail = f"снимок при старте приёмки: status=failed, ошибка: {progress_seen['error']}"
+    else:
+        snapshot_ok = False
+        snapshot_detail = (
+            "снимок при старте приёмки: status=ready — перебор уже завершился до первого "
+            "запроса приёмки, счётчик остался непроверенным; чтобы гейт что-то проверял, "
+            f"перезапустите сервер на {PORT} непосредственно перед verify_gates.py"
+        )
+    check("Гейт 23д — счётчик перебора виден снаружи", snapshot_ok, snapshot_detail)
+
+
 def main() -> None:
+    # Снимок панели улучшений — первым делом, до store.load() и до любого гейта.
+    # Фоновый перебор стартует на сервере сразу после warm и укладывается в ~15 с;
+    # весь прогон приёмки — заметно дольше (модельные гейты). Если ждать до gate23,
+    # окно уже закроется. Один запрос, без цикла и без sleep: либо перебор ещё
+    # считает прямо сейчас, либо уже нет — это и есть ответ на вопрос гейта 23д.
+    global progress_seen
+    progress_seen, _ms = get_json("/api/improvements?weekday=fri&hour=8&limit=12")
+
     import polars as pl
 
     from app import coverage
@@ -1037,6 +1196,7 @@ def main() -> None:
     quality = gate20(store)
     gate21(store, options_route)
     speed = gate22(store, attention_route)
+    gate23(store)
 
     print()
     print("Разобранный сценарий (фраза → объект для POST /api/scenario):")

@@ -23,10 +23,11 @@ import { latLngToCell } from 'h3-js'
 import { MapView, type ContextTarget, type HexHover } from './MapView'
 import { hexScaleOf } from './hexLayer'
 import { AttentionPanel } from './AttentionPanel'
+import { ImprovementsPanel } from './ImprovementsPanel'
 import { HoleCard } from './HoleCard'
 import { optionKey } from './OptionsBlock'
 import { useHoleOptions, useRouteOptions } from './useOptions'
-import type { Attention, ExtensionOption } from './api'
+import type { Attention, ExtensionOption, Improvements } from './api'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import type { Selection } from './mapLayers'
 import { readUrl, writeUrl } from './urlState'
@@ -170,6 +171,9 @@ export function App(): React.JSX.Element {
   const [attentionLoading, setAttentionLoading] = useState(true)
   const [attentionError, setAttentionError] = useState<string | null>(null)
   const [attentionOpen, setAttentionOpen] = useState(true)
+  const [improvements, setImprovements] = useState<Improvements | null>(null)
+  const [improvementsError, setImprovementsError] = useState<string | null>(null)
+  const [improvementsOpen, setImprovementsOpen] = useState(true)
   /** Выбранная ячейка слоя населения: её карточка живёт в правой колонке. */
   const [hexCell, setHexCell] = useState<BaselineHex | null>(null)
   /** Уже применённые варианты продления: кнопка не должна звать дважды. */
@@ -249,6 +253,37 @@ export function App(): React.JSX.Element {
       })
     return () => {
       cancelled = true
+    }
+  }, [weekday, hour])
+
+  // Пока фоновый перебор не досчитал, опрашиваем раз в секунду. Опрос
+  // прекращается и на ready, и на failed: висящий таймер на сцене — это
+  // запрос в секунду до конца показа.
+  useEffect(() => {
+    let cancelled = false
+    let timer: number | undefined
+    const tick = () => {
+      api
+        .improvements(weekday, hour)
+        .then((d) => {
+          if (cancelled) return
+          setImprovements(d)
+          setImprovementsError(null)
+          if (d.status === 'computing') timer = window.setTimeout(tick, 1000)
+        })
+        .catch((err) => {
+          if (cancelled) return
+          setImprovementsError(err instanceof Error ? err.message : String(err))
+          // Один сбойный опрос не должен быть последним: перебор на сервере
+          // может ещё считать, и без повторной попытки панель зависает на
+          // ошибке навсегда, хотя сервер давно досчитал.
+          timer = window.setTimeout(tick, 1000)
+        })
+    }
+    tick()
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
     }
   }, [weekday, hour])
 
@@ -1007,6 +1042,18 @@ export function App(): React.JSX.Element {
               selected={selection?.routeNum ?? null}
               open={attentionOpen}
               onToggle={() => setAttentionOpen((v) => !v)}
+              onPick={onPickRoute}
+            />
+
+            {/* Тот же расчёт, что по клику на маршрут, прогнанный по всем
+                маршрутам сразу: ранжирование по людям, а не по отклонению
+                от плана. */}
+            <ImprovementsPanel
+              data={improvements}
+              error={improvementsError}
+              selected={selection?.routeNum ?? null}
+              open={improvementsOpen}
+              onToggle={() => setImprovementsOpen((v) => !v)}
               onPick={onPickRoute}
             />
 
