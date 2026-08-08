@@ -44,6 +44,19 @@ class ToolError(ValueError):
     """Инструмент не может посчитать — с причиной, которую можно сказать человеку."""
 
 
+def _stop_label(name: str | None, stop_id: str) -> str:
+    """Название остановки для человека. У 79 остановок его в OSM нет.
+
+    Раньше вместо пустого названия подставлялся сам идентификатор, и в списке
+    вариантов стояло «продлить до „N5297373716“» — по такой строке нельзя ни
+    понять, где это, ни сказать, что названия просто нет. Идентификатор
+    остаётся в строке, но подписан тем, чем является.
+    """
+    if name:
+        return name
+    return f"остановка без названия ({stop_id})"
+
+
 def _route_exists(store: Store, route_num: str) -> bool:
     return (
         store.routes is not None
@@ -330,7 +343,7 @@ def _evaluate_extension(
         "direction": direction,
         "action": "продлить до остановки",
         "stop_id": stop_id,
-        "stop_name": names.get(stop_id) or stop_id,
+        "stop_name": _stop_label(names.get(stop_id), stop_id),
         "confidence": confidence.get(stop_id),
         "lat": coords[stop_id][0],
         "lon": coords[stop_id][1],
@@ -505,7 +518,7 @@ def coverage_holes(store: Store, index: list, params: dict) -> dict:
                 "people": int(round(float(row["population"]))),
                 "lat": round(float(row["lat"]), 5),
                 "lon": round(float(row["lon"]), 5),
-                "nearest_served_stop": row["nearest_stop_name"] or row["nearest_stop_id"],
+                "nearest_served_stop": _stop_label(row["nearest_stop_name"], row["nearest_stop_id"]),
                 # None бывает: до гексагона не доходит пешеходная сеть
                 "walk_distance_m": (
                     None
@@ -714,7 +727,9 @@ def data_summary(store: Store, index: list, params: dict) -> dict:
         "directions_without_stop_order": int(total_directions - exact),
         "directions_with_trace": int(with_geometry),
         "routes_with_defective_source_data": int(len(flagged)),
-        "routes_with_defective_source_data_numbers": sorted(flagged),
+        "routes_with_defective_source_data_numbers": sorted(
+            flagged, key=dataquality.route_sort_key
+        ),
         "stops_total": int(store.stops.height),
         "stops_served": served,
         "segments_by_real_traffic_percent": traffic_share,

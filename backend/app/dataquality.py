@@ -28,6 +28,24 @@ from scipy.spatial import cKDTree
 from app import config
 from app.store import Store
 
+
+def route_sort_key(route_num: str) -> tuple[int, str]:
+    """Порядок номеров такой, каким его читает человек: 8 раньше 122.
+
+    Номер — строка, и сортировка строк ставит «122» перед «8». В списке на
+    экране это выглядит как случайная россыпь. Буквенный хвост («13Т») идёт
+    после голого числа, номера без цифр — в конец.
+    """
+    digits = ""
+    for char in route_num:
+        if not char.isdigit():
+            break
+        digits += char
+    if not digits:
+        return (10**9, route_num)
+    return (int(digits), route_num[len(digits) :])
+
+
 _FLAGS: dict[int, dict[str, list[dict]]] = {}
 _HOUSING: dict[int, dict[str, int]] = {}
 
@@ -78,11 +96,16 @@ def _length_flags(store: Store) -> dict[str, list[dict]]:
         if length_km and chain_m:
             ratio = float(length_km) * 1000.0 / float(chain_m)
             if not config.GEOMETRY_CHAIN_RATIO_MIN <= ratio <= config.GEOMETRY_CHAIN_RATIO_MAX:
+                # Отношение меньше единицы человек читает как «расхождения почти
+                # нет», хотя трасса втрое короче своих же перегонов. Поэтому во
+                # фразе всегда кратность больше единицы и слово, куда она.
+                fold = ratio if ratio >= 1.0 else 1.0 / ratio
+                where = "длиннее" if ratio >= 1.0 else "короче"
                 found.append(
                     _flag(
                         "geometry_chain_mismatch",
                         f"трасса {length_km:.1f} км против {chain_m / 1000:.1f} км "
-                        f"по собственным перегонам, расхождение в {ratio:.1f} раза",
+                        f"по собственным перегонам, {where} в {fold:.1f} раза",
                         direction=row["direction"],
                         ratio=round(ratio, 2),
                     )
@@ -246,7 +269,7 @@ def report(store: Store) -> dict:
                 "reasons": list(dict.fromkeys(item["message"] for item in items)),
                 "codes": list(dict.fromkeys(item["code"] for item in items)),
             }
-            for num, items in sorted(marked.items(), key=lambda kv: kv[0])
+            for num, items in sorted(marked.items(), key=lambda kv: route_sort_key(kv[0]))
         ],
     }
 

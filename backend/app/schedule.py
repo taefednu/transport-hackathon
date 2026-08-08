@@ -13,7 +13,7 @@ import math
 import numpy as np
 import polars as pl
 
-from app.config import DWELL_SEC, LAYOVER_MIN
+from app.config import DWELL_SEC, LAYOVER_MIN, WEEKDAY_NAMES
 from app.store import Store
 
 SECONDS_PER_HOUR = 3600
@@ -131,6 +131,30 @@ def run_trip(matrix: np.ndarray, departure_sec: float) -> list[float]:
     return arrivals
 
 
+def no_travel_reason(store: Store, route_num: str, direction: str, weekday: str) -> str:
+    """Почему времени хода нет: дело в дне или в самом маршруте.
+
+    Причины две, и они не взаимозаменяемы. У воскресенья трафика нет ни у
+    одного маршрута — это про день. У части направлений порядок остановок
+    восстановлен лишь приблизительно — это про маршрут. Раньше называлась
+    всегда вторая, и в воскресенье маршрут с `quality=exact` получал в ответ
+    объяснение про приблизительный порядок остановок.
+    """
+    day = WEEKDAY_NAMES.get(weekday, weekday)
+    no_day = store.segment_time is None or store.segment_time.filter(
+        pl.col("weekday_type") == weekday
+    ).is_empty()
+    if no_day:
+        return (
+            f"за {day} нет времени хода: данные о трафике в исходных материалах "
+            "есть только за другие дни"
+        )
+    return (
+        f"для маршрута {route_num} ({direction}, {weekday}) нет времени хода: "
+        "порядок остановок восстановлен частично (quality=approximate)"
+    )
+
+
 def build(
     store: Store,
     route_num: str,
@@ -152,10 +176,7 @@ def build(
     if matrix is None:
         return {
             "available": False,
-            "reason": (
-                f"для маршрута {route_num} ({direction}, {weekday}) нет времени хода: "
-                "порядок остановок восстановлен частично (quality=approximate)"
-            ),
+            "reason": no_travel_reason(store, route_num, direction, weekday),
             "stops": [],
             "trips": 0,
         }

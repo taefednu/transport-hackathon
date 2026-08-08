@@ -65,6 +65,34 @@ def store() -> Store:
     return STATE["store"]
 
 
+def check_weekday(weekday: str) -> str:
+    """День недели сверяется со справочником на входе в каждый эндпоинт.
+
+    Незнакомый день не бросается сам собой: он уходит в фильтр по колонке
+    `weekday_type`, тот не находит ни одной строки, и ответ приходит пустым —
+    сценарий «ничего не изменилось», расписание из одних прочерков. Пустота
+    выглядит как ответ, а это опечатка в запросе.
+    """
+    if weekday not in config.WEEKDAY_TYPES:
+        raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
+    return weekday
+
+
+def check_hour(value: object) -> int:
+    """Час из тела запроса. В строке запроса его проверяет FastAPI, в теле — никто.
+
+    `int("вчера")` бросало ValueError и превращалось в 500 «Internal Server
+    Error», а час 99 доезжал до расчёта и возвращался в ответе как настоящий.
+    """
+    try:
+        hour = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise HTTPException(422, f"час должен быть числом от 0 до 23, а пришло {value!r}") from None
+    if not 0 <= hour <= 23:
+        raise HTTPException(422, f"час должен быть от 0 до 23, а пришло {hour}")
+    return hour
+
+
 @app.get("/api/meta")
 def meta() -> dict:
     st = store()
@@ -244,6 +272,7 @@ def route_detail(
     direction: str = Query(default="fwd"),
     weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
 ) -> dict:
+    check_weekday(weekday)
     st = store()
     if st.routes is None:
         raise HTTPException(503, "нет data/build/routes.parquet (шаг 4 пайплайна)")
@@ -317,9 +346,10 @@ def route_schedule(
     direction: str = Query(default="fwd"),
     weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
     first_departure: str = Query(default=None),
-    headway_min: float = Query(default=None, gt=0),
+    headway_min: float = Query(default=None, ge=config.MIN_HEADWAY_MIN),
     n_vehicles: int = Query(default=None, ge=0),
 ) -> dict:
+    check_weekday(weekday)
     st = store()
     if st.routes is None:
         raise HTTPException(503, "нет data/build/routes.parquet (шаг 4 пайплайна)")
@@ -429,8 +459,7 @@ def baseline(
     weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
     hour: int = Query(default=8, ge=0, le=23),
 ) -> dict:
-    if weekday not in config.WEEKDAY_TYPES:
-        raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
+    check_weekday(weekday)
     return coverage.baseline(store(), weekday, hour)
 
 
@@ -445,8 +474,7 @@ def diagnostics_attention(
     Тот же расчёт, что зовёт ассистент, но доступный напрямую: диагностика
     нужна и тогда, когда сети нет или ключа модели нет.
     """
-    if weekday not in config.WEEKDAY_TYPES:
-        raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
+    check_weekday(weekday)
     return diagnostics.attention(store(), weekday, hour, limit)
 
 
@@ -458,8 +486,7 @@ def route_options(
     direction: str | None = Query(default=None),
 ) -> dict:
     """Варианты продления маршрута из перебора. Ничего не применяет."""
-    if weekday not in config.WEEKDAY_TYPES:
-        raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
+    check_weekday(weekday)
     try:
         return tools.route_options(
             store(),
@@ -479,8 +506,7 @@ def hole_options(
     hour: int = Query(default=8, ge=0, le=23),
 ) -> dict:
     """Чем закрыть конкретную дыру покрытия и какой ценой."""
-    if weekday not in config.WEEKDAY_TYPES:
-        raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
+    check_weekday(weekday)
     try:
         return tools.hole_options(
             store(), STATE["search_index"], {"h3": h3, "weekday": weekday, "hour": hour}
@@ -501,8 +527,7 @@ def headways(
     Маршруты, по которым за этот час нет ни одного рейса в транзакциях,
     в ответе отсутствуют — их интервал неизвестен, а не равен нулю.
     """
-    if weekday not in config.WEEKDAY_TYPES:
-        raise HTTPException(422, f"weekday должен быть одним из {config.WEEKDAY_TYPES}")
+    check_weekday(weekday)
     st = store()
     if st.headway_actual is None:
         raise HTTPException(503, "нет data/build/headway_actual.parquet (шаг 6 пайплайна)")
@@ -520,8 +545,9 @@ def headways(
 @app.post("/api/scenario")
 def post_scenario(body: dict) -> dict:
     weekday = body.get("weekday", config.WEEKDAY_TYPES[0])
-    hour = int(body.get("hour", 8))
+    hour = check_hour(body.get("hour", 8))
     ops = body.get("ops") or []
+    check_weekday(weekday)
     if not isinstance(ops, list) or not ops:
         raise HTTPException(422, "нужен непустой список ops")
     try:
@@ -578,7 +604,7 @@ def assistant(body: dict) -> dict:
         STATE["search_index"],
         text,
         weekday=body.get("weekday"),
-        hour=None if hour is None else int(hour),
+        hour=None if hour is None else check_hour(hour),
     )
 
 
@@ -621,7 +647,7 @@ def export_schedule(
     direction: str = Query(default="fwd"),
     weekday: str = Query(default=config.WEEKDAY_TYPES[0]),
     first_departure: str = Query(default=None),
-    headway_min: float = Query(default=None, gt=0),
+    headway_min: float = Query(default=None, ge=config.MIN_HEADWAY_MIN),
 ) -> Response:
     payload = route_schedule(route_num, direction, weekday, first_departure, headway_min, None)
     if not payload.get("available"):

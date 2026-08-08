@@ -316,7 +316,7 @@ def attention(store: Store, weekday: str, hour: int, limit: int) -> dict:
             "route_num": num,
             "reasons": list(dict.fromkeys(item["message"] for item in items)),
         }
-        for num, items in sorted(marked.items(), key=lambda kv: kv[0])
+        for num, items in sorted(marked.items(), key=lambda kv: dataquality.route_sort_key(kv[0]))
     ]
     return {
         "weekday": weekday,

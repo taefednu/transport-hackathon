@@ -16,7 +16,7 @@ import polars as pl
 import shapely
 from shapely.ops import substring
 
-from app import coverage, schedule, validation
+from app import config, coverage, schedule, validation
 from app.store import Store
 
 OPS_WITH_STOPS = ("extend_route", "trim_route", "insert_stop", "remove_stop")
@@ -40,6 +40,29 @@ def _route_sequence(store: Store, route_num: str, direction: str) -> list[str]:
     return seq["stop_id"].to_list()
 
 
+def _required(op: dict, field: str):
+    """Обязательное поле операции. Нет его — это ошибка запроса, а не сбой.
+
+    Раньше поле бралось как `op["until_seq"]`, и запрос без него давал
+    KeyError, то есть 500 «Internal Server Error». Снаружи это выглядит как
+    поломка сервера, хотя сервер цел, а неверен запрос — и причину, по которой
+    его отвергли, никто не видит.
+    """
+    if field not in op or op[field] is None:
+        raise ScenarioError(f"в операции «{op.get('type')}» не задано поле {field}")
+    return op[field]
+
+
+def _required_int(op: dict, field: str) -> int:
+    value = _required(op, field)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ScenarioError(
+            f"поле {field} операции «{op.get('type')}» должно быть числом, а пришло {value!r}"
+        ) from None
+
+
 def apply_ops(store: Store, ops: list[dict]) -> tuple[dict[tuple[str, str], list[str]], dict]:
     """Возвращает изменённые последовательности остановок и параметры расписаний."""
     sequences: dict[tuple[str, str], list[str]] = {}
@@ -53,12 +76,20 @@ def apply_ops(store: Store, ops: list[dict]) -> tuple[dict[tuple[str, str], list
             # заполнять все поля схемы), а дальше по коду ноль ложным значением
             # молча подменился бы интервалом из реестра. Лучше сказать вслух.
             headway = op.get("headway_min")
-            if headway is not None and float(headway) <= 0:
-                raise ScenarioError("интервал должен быть больше нуля")
+            if headway is not None:
+                value = float(headway)
+                if value <= 0:
+                    raise ScenarioError("интервал должен быть больше нуля")
+                # положительный, но крошечный интервал не абсурд на вид, а
+                # миллион рейсов в расписании и смерть процесса по памяти
+                if value < config.MIN_HEADWAY_MIN:
+                    raise ScenarioError(
+                        f"интервал не может быть меньше {config.MIN_HEADWAY_MIN:.0f} мин"
+                    )
             vehicles = op.get("n_vehicles")
             if vehicles is not None and int(vehicles) < 0:
                 raise ScenarioError("число машин на линии не может быть отрицательным")
-            schedules[op["route_num"]] = {
+            schedules[_required(op, "route_num")] = {
                 "first_departure": op.get("first_departure"),
                 "headway_min": headway,
                 "n_vehicles": vehicles,
@@ -68,7 +99,7 @@ def apply_ops(store: Store, ops: list[dict]) -> tuple[dict[tuple[str, str], list
         if kind not in OPS_WITH_STOPS:
             raise ScenarioError(f"неизвестная операция: {kind}")
 
-        route_num = op["route_num"]
+        route_num = _required(op, "route_num")
         direction = op.get("direction", "fwd")
         key = (route_num, direction)
         if key not in sequences:
@@ -76,25 +107,31 @@ def apply_ops(store: Store, ops: list[dict]) -> tuple[dict[tuple[str, str], list
         seq = sequences[key]
 
         if kind == "extend_route":
-            for stop_id in op["stops"]:
+            for stop_id in _required(op, "stops"):
                 if stop_id not in known_stops:
                     raise ScenarioError(
                         f"остановки {stop_id} нет в базе; создавать новые остановки нельзя"
                     )
                 seq.append(stop_id)
         elif kind == "trim_route":
-            until = int(op["until_seq"])
+            until = _required_int(op, "until_seq")
             if not 0 <= until < len(seq):
                 raise ScenarioError(f"until_seq={until} вне маршрута длиной {len(seq)}")
             sequences[key] = seq[: until + 1]
         elif kind == "insert_stop":
-            stop_id = op["stop_id"]
+            stop_id = _required(op, "stop_id")
             if stop_id not in known_stops:
                 raise ScenarioError(f"остановки {stop_id} нет в базе")
-            after = int(op["after_seq"])
+            after = _required_int(op, "after_seq")
+            # у обрезки и удаления границы проверяются, у вставки не
+            # проверялись — а list.insert к границам не придирается: after_seq
+            # 999 молча клал остановку в конец, −50 в начало, и ответ выглядел
+            # посчитанным по тому месту, которое просили
+            if not 0 <= after < len(seq):
+                raise ScenarioError(f"after_seq={after} вне маршрута длиной {len(seq)}")
             seq.insert(after + 1, stop_id)
         elif kind == "remove_stop":
-            index = int(op["seq"])
+            index = _required_int(op, "seq")
             if not 0 <= index < len(seq):
                 raise ScenarioError(f"seq={index} вне маршрута длиной {len(seq)}")
             seq.pop(index)

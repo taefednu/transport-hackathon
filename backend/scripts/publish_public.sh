@@ -26,7 +26,7 @@ MESSAGE="${1:-обновление кода}"
 # Что наружу не уезжает. Шаблоны сверяются с путём файла от корня репозитория.
 # frontend-ref.png — референс чужого дизайна, происхождение неизвестно: это не
 # наш материал, и в репозиторий под своей лицензией он попадать не должен.
-EXCLUDE_REGEX='^(backend/data/|knowledge/|CLAUDE\.md$|NIGHT_REPORT\.md$|.*_tz\.md$|.*_spec\.md$|frontend-ref\.png$)'
+EXCLUDE_REGEX='^(backend/data/|knowledge/|CLAUDE\.md$|NIGHT_REPORT\.md$|NIGHT_FIXES\.md$|.*_tz\.md$|.*_spec\.md$|frontend-ref\.png$)'
 
 cd "$ROOT"
 # берём именно отслеживаемые файлы: в публикацию не может попасть ничего, чего

@@ -1,7 +1,7 @@
 /** Карточка маршрута (§12). Показывает только то, что реально есть в данных. */
 
 import { API_BASE, type Direction, type ExtensionOption, type RouteSummary } from './api'
-import { Card, Caveat, Rows } from './Card'
+import { Card, Caveat, Rows, type Row } from './Card'
 import { duration, hourLabel, km, minutes, plural } from './format'
 import { NoOptions, OptionsBlock } from './OptionsBlock'
 import type { Loaded } from './useOptions'
@@ -132,7 +132,17 @@ export function RouteCard({
             'остановок',
             detail ? chainView.length || detail.stops.length || summary?.n_stops || '—' : '…',
           ],
-          ['длина', km(detail?.length_km ?? summary?.length_km)],
+          // Число остановок в строке выше уже с правками, а длина остаётся
+          // реестровой: ядро её по сценарию не пересчитывает. Рядом это
+          // читается как «18 остановок на 14,8 км» — маршрут, которого нет.
+          edited
+            ? ([
+                'длина по реестру',
+                km(detail?.length_km ?? summary?.length_km),
+                'Длина исходной трассы. Правки сценария её не пересчитывают — ' +
+                  'насколько маршрут изменился, видно в блоке показателей: время в пути и оборот.',
+              ] as Row)
+            : (['длина', km(detail?.length_km ?? summary?.length_km)] as Row),
           ['плановый интервал', minutes(detail?.planned_headway_min ?? summary?.planned_headway_min)],
           [
             `фактический интервал в ${hourLabel(hour)}:00`,

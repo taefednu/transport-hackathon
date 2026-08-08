@@ -1151,8 +1151,12 @@ export function App(): React.JSX.Element {
 
             <MetricsPanel
               baseline={baseline}
-              computation={computation}
-              hasOps={effectiveOps.length > 0}
+              // «база» — сеть как она есть сегодня: подсказка на кнопке обещает,
+              // что правки сценария не рисуются на карте и не входят в числа.
+              // Карта это выполняла, панель чисел — нет. Без результата панель
+              // показывает базовые числа сама.
+              computation={mode === 'base' ? { ...computation, result: null } : computation}
+              hasOps={mode !== 'base' && effectiveOps.length > 0}
               routeNum={selection?.routeNum ?? null}
               atHour={routeData.detail?.actual_headway.find((h) => h.hour === hour) ?? null}
               schedule={routeData.schedule}
@@ -1316,7 +1320,13 @@ export function App(): React.JSX.Element {
                     <b>Shift + клик</b> по любой ручке — обрезать маршрут до неё
                   </li>
                   <li>
-                    <b>клик по линии</b> — вставить остановку, <b>Delete</b> — убрать выбранную
+                    <b>Delete</b> — убрать выбранную остановку
+                  </li>
+                  {/* Вставка живёт в отдельном инструменте: в правке клик по
+                      линии только снимает выбор ручки. Подсказка обещала
+                      вставку здесь, и человек кликал по линии впустую. */}
+                  <li>
+                    вставить остановку — соседний инструмент в доке, клик по линии уже в нём
                   </li>
                 </ol>
               )}

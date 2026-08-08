@@ -446,13 +446,35 @@ export class ApiError extends Error {
   }
 }
 
+/** Причина отказа человеческой строкой.
+ *
+ * Ядро отвечает `detail` строкой, а проверка параметров в FastAPI — списком
+ * объектов `{loc, msg}`. Раньше список подставлялся в текст как есть, и на
+ * экране стояло «ядро не построило расписание: [object Object]». Из списка
+ * собирается «поле: причина», из строки — она сама.
+ */
+function failureText(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        const entry = item as { loc?: unknown[]; msg?: string }
+        const field = Array.isArray(entry.loc) ? String(entry.loc[entry.loc.length - 1]) : ''
+        return field ? `${field}: ${entry.msg ?? ''}` : (entry.msg ?? '')
+      })
+      .filter(Boolean)
+      .join('; ')
+  }
+  return ''
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(API_BASE + path, init)
   if (!res.ok) {
     const body = await res.text().catch(() => '')
     let detail = body
     try {
-      detail = (JSON.parse(body) as { detail?: string }).detail ?? body
+      detail = failureText((JSON.parse(body) as { detail?: unknown }).detail) || body
     } catch {
       /* тело не json — берём как есть */
     }
